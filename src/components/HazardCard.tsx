@@ -45,10 +45,7 @@ export const HazardCard: React.FC<HazardCardProps> = ({
 
   const actorId = user?.id ?? 'guest-citizen';
   const isAdmin = user?.role === 'admin';
-  const canDelete =
-    isAdmin ||
-    hazard.reporterId === actorId ||
-    hazard.reporterId === 'guest-citizen';
+  const canDelete = isAdmin;
   const hasConfirmed = hazard.confirmedByUserIds.includes(actorId);
   const hasReportedAbsent = hazard.notPresentByUserIds.includes(actorId);
 
@@ -150,7 +147,7 @@ export const HazardCard: React.FC<HazardCardProps> = ({
                 ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-400'
                 : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'
             }`}
-            title="Report hazard is no longer present"
+            title="Flag hazard as cleared for Admin review"
           >
             <ThumbsDown size={12} />
             Cleared
@@ -183,7 +180,7 @@ export const HazardCard: React.FC<HazardCardProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    void deleteHazardReport(hazard.id);
+                    void deleteHazardReport(hazard.id, true);
                     setConfirmingDelete(false);
                   }}
                   className="rounded-lg bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700 whitespace-nowrap shrink-0"

@@ -1,7 +1,23 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const rawUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
-const rawKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+declare global {
+  interface Window {
+    __SUPABASE_ENV__?: {
+      url?: string;
+      anonKey?: string;
+    };
+  }
+}
+
+const runtimeEnv = typeof window !== 'undefined' ? window.__SUPABASE_ENV__ : undefined;
+const rawUrl = (
+  (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
+  runtimeEnv?.url
+)?.trim();
+const rawKey = (
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ||
+  runtimeEnv?.anonKey
+)?.trim();
 
 function normalizeSupabaseUrl(value?: string): string | undefined {
   if (!value || value.includes('YOUR_PROJECT_ID')) {

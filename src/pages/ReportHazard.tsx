@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertTriangle,
@@ -8,8 +8,8 @@ import {
   Loader2,
   MapPin,
   ScanSearch,
-  Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 import { CategoryIcon } from '../components/CategoryIcon';
 import { MapView } from '../components/MapView';
@@ -52,18 +52,66 @@ const SAMPLE_PHOTOS = [
   },
 ];
 
+async function readAndCompressImage(file: File): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('Could not read selected image file.'));
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read image file.'));
+    reader.readAsDataURL(file);
+  });
+
+  if (file.size <= 350 * 1024) {
+    return dataUrl;
+  }
+
+  return new Promise<string>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 1280;
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = Math.min(maxDim / width, maxDim / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(dataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      try {
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 export const ReportHazard: React.FC = () => {
   const { user } = useAuth();
   const {
     hazards,
     userLocation,
+    hasDetectedGps,
     detectUserLocation,
     useApproximateLocation,
     gpsStatus,
     gpsNotice,
     gpsError,
     addHazardReport,
-    deleteHazardReport,
   } = useSafetyData();
 
   const [category, setCategory] = useState<HazardCategory>('Damaged Roads');
@@ -76,9 +124,24 @@ export const ReportHazard: React.FC = () => {
   const [pickedCoords, setPickedCoords] = useState<Coordinates>(userLocation);
   const [addressQuery, setAddressQuery] = useState('');
   const [error, setError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState<{
+    title?: string;
+    description?: string;
+  }>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedReport, setSubmittedReport] = useState<HazardReport | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
+
+  const topBannerRef = useRef<HTMLDivElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const descriptionInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const hasManuallyPickedRef = useRef(false);
+
+  // If background GPS detects location before the user picks a spot manually, center pin there
+  useEffect(() => {
+    if (hasDetectedGps && !hasManuallyPickedRef.current) {
+      setPickedCoords(userLocation);
+    }
+  }, [hasDetectedGps, userLocation.lat, userLocation.lng]);
 
   const actorId = user?.id ?? 'guest-citizen';
   const mySubmittedReports = useMemo(
@@ -102,6 +165,7 @@ export const ReportHazard: React.FC = () => {
   }, [title, description, category, photoUrl, photoName, pickedCoords, hazards]);
 
   const handleCaptureGps = async () => {
+    hasManuallyPickedRef.current = true;
     setLocationMode('gps');
     const coords = await detectUserLocation();
     if (coords) {
@@ -116,78 +180,102 @@ export const ReportHazard: React.FC = () => {
     }
   };
 
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    setPhotoName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setPhotoUrl(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+    if (!file.type.startsWith('image/')) {
+      setError('Please choose a valid image file (PNG, JPG, or WebP).');
+      return;
+    }
     setError('');
-    if (!title.trim() || title.trim().length < 5) {
-      setError('Please enter a clear hazard title (at least 5 characters).');
-      return;
+    setPhotoName(file.name);
+    try {
+      const processedUrl = await readAndCompressImage(file);
+      setPhotoUrl(processedUrl);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Unable to process selected photo.'
+      );
     }
-    if (!description.trim() || description.trim().length < 10) {
-      setError('Please describe the hazard details so commuters understand the risk.');
-      return;
-    }
-
-    const created = addHazardReport({
-      title,
-      category,
-      description,
-      severity,
-      location: pickedCoords,
-      address: addressQuery || `Selected Location (${formatCoords(pickedCoords)})`,
-      photoUrl,
-      photoName,
-      reportedBy: user?.fullName ?? 'Guest Citizen',
-      reporterId: user?.id ?? 'guest-citizen',
-    });
-
-    setSubmittedReport(created);
-    setDeleteNotice(null);
-    setConfirmDeleteId(null);
-    setTitle('');
-    setDescription('');
-    setPhotoUrl(undefined);
-    setPhotoName('');
   };
 
-  const handleDeleteReport = async (report: HazardReport) => {
-    await deleteHazardReport(report.id);
-    if (submittedReport?.id === report.id) {
-      setSubmittedReport(null);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+
+    setError('');
+    setFieldErrors({});
+
+    const trimmedTitle = title.trim();
+    const trimmedDesc = description.trim();
+
+    if (trimmedTitle.length < 3) {
+      const msg = 'Please enter a hazard title (at least 3 characters).';
+      setError(msg);
+      setFieldErrors({ title: msg });
+      titleInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      titleInputRef.current?.focus();
+      return;
     }
-    setConfirmDeleteId(null);
-    setDeleteNotice(`Deleted hazard report "${report.title}".`);
+
+    if (trimmedDesc.length < 5) {
+      const msg =
+        'Please enter a short description of the hazard (at least 5 characters).';
+      setError(msg);
+      setFieldErrors({ description: msg });
+      descriptionInputRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+      descriptionInputRef.current?.focus();
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const created = await addHazardReport({
+        title: trimmedTitle,
+        category,
+        description: trimmedDesc,
+        severity,
+        location: pickedCoords,
+        address:
+          addressQuery.trim() || `Selected Location (${formatCoords(pickedCoords)})`,
+        photoUrl,
+        photoName,
+        reportedBy: user?.fullName ?? 'Guest Citizen',
+        reporterId: user?.id ?? 'guest-citizen',
+      });
+
+      setSubmittedReport(created);
+      setTitle('');
+      setDescription('');
+      setPhotoUrl(undefined);
+      setPhotoName('');
+      setFieldErrors({});
+      setError('');
+
+      window.requestAnimationFrame(() => {
+        topBannerRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+        });
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Could not submit hazard report. Please try again.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
     <SidebarLayout title="Report a Hazard">
-      <div className="mx-auto max-w-6xl space-y-6">
-        {deleteNotice && (
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-medium text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
-            <span>{deleteNotice}</span>
-            <button
-              type="button"
-              onClick={() => setDeleteNotice(null)}
-              className="font-semibold text-[#2563EB] hover:underline"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
-
+      <div ref={topBannerRef} className="mx-auto max-w-6xl space-y-6">
         {submittedReport && (
           <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-950/50">
             <div className="flex items-start gap-3">
@@ -197,11 +285,11 @@ export const ReportHazard: React.FC = () => {
               />
               <div>
                 <h2 className="text-sm font-bold text-emerald-950 dark:text-emerald-200">
-                  Hazard Report Submitted to Community Map
+                  Hazard Report Saved Permanently to Community Map
                 </h2>
                 <p className="mt-0.5 text-xs text-emerald-800 dark:text-emerald-300">
-                  "{submittedReport.title}" is now awaiting admin review as{' '}
-                  <strong>{submittedReport.status}</strong>.
+                  "{submittedReport.title}" is now visible on the map as{' '}
+                  <strong>{submittedReport.status}</strong> and will stay on the map until an Admin marks it Resolved.
                 </p>
               </div>
             </div>
@@ -218,33 +306,6 @@ export const ReportHazard: React.FC = () => {
               >
                 My Reports
               </Link>
-              {confirmDeleteId === submittedReport.id ? (
-                <div className="inline-flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => void handleDeleteReport(submittedReport)}
-                    className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:bg-red-700"
-                  >
-                    Confirm Delete
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDeleteId(null)}
-                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setConfirmDeleteId(submittedReport.id)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300"
-                >
-                  <Trash2 size={13} />
-                  Delete Report
-                </button>
-              )}
             </div>
           </div>
         )}
@@ -297,28 +358,58 @@ export const ReportHazard: React.FC = () => {
 
               <div className="mt-5">
                 <label className="mb-1.5 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Hazard Title
+                  Hazard Title <span className="text-red-500">*</span>
                 </label>
                 <input
+                  ref={titleInputRef}
                   type="text"
                   value={title}
-                  onChange={(e) => setTitle(e.target.value)}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    if (fieldErrors.title) {
+                      setFieldErrors((prev) => ({ ...prev, title: undefined }));
+                    }
+                  }}
                   placeholder="e.g., Deep pothole near school crosswalk"
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2.5 text-sm focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                  className={`w-full rounded-lg border bg-white px-3.5 py-2.5 text-sm focus:outline-none dark:bg-slate-950 dark:text-white ${
+                    fieldErrors.title
+                      ? 'border-red-500 focus:border-red-600 dark:border-red-500'
+                      : 'border-slate-200 focus:border-blue-600 dark:border-slate-700'
+                  }`}
                 />
+                {fieldErrors.title && (
+                  <p className="mt-1 text-xs font-medium text-red-600 dark:text-red-400">
+                    {fieldErrors.title}
+                  </p>
+                )}
               </div>
 
               <div className="mt-4">
                 <label className="mb-1.5 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                  Description
+                  Description <span className="text-red-500">*</span>
                 </label>
                 <textarea
+                  ref={descriptionInputRef}
                   rows={3}
                   value={description}
-                  onChange={(e) => setDescription(e.target.value)}
+                  onChange={(e) => {
+                    setDescription(e.target.value);
+                    if (fieldErrors.description) {
+                      setFieldErrors((prev) => ({ ...prev, description: undefined }));
+                    }
+                  }}
                   placeholder="Describe what commuters, cyclists, or pedestrians should watch out for..."
-                  className="w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2.5 text-sm focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                  className={`w-full rounded-lg border bg-white px-3.5 py-2.5 text-sm focus:outline-none dark:bg-slate-950 dark:text-white ${
+                    fieldErrors.description
+                      ? 'border-red-500 focus:border-red-600 dark:border-red-500'
+                      : 'border-slate-200 focus:border-blue-600 dark:border-slate-700'
+                  }`}
                 />
+                {fieldErrors.description && (
+                  <p className="mt-1 text-xs font-medium text-red-600 dark:text-red-400">
+                    {fieldErrors.description}
+                  </p>
+                )}
               </div>
 
               {/* Severity */}
@@ -426,14 +517,28 @@ export const ReportHazard: React.FC = () => {
                 </div>
 
                 <div className="mt-3 grid gap-4 sm:grid-cols-12 sm:items-center">
-                  <div className="sm:col-span-4">
+                  <div className="relative sm:col-span-4">
                     {photoUrl ? (
-                      <img
-                        src={photoUrl}
-                        alt="Uploaded hazard preview"
-                        referrerPolicy="no-referrer"
-                        className="h-24 w-full rounded-lg border border-slate-200 object-cover dark:border-slate-700"
-                      />
+                      <>
+                        <img
+                          src={photoUrl}
+                          alt="Uploaded hazard preview"
+                          referrerPolicy="no-referrer"
+                          className="h-24 w-full rounded-lg border border-slate-200 object-cover dark:border-slate-700"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPhotoUrl(undefined);
+                            setPhotoName('');
+                          }}
+                          title="Remove photo"
+                          aria-label="Remove photo"
+                          className="absolute right-1.5 top-1.5 rounded-full bg-slate-900/75 p-1 text-white hover:bg-slate-900"
+                        >
+                          <X size={12} />
+                        </button>
+                      </>
                     ) : (
                       <div className="flex h-24 w-full items-center justify-center rounded-lg border border-slate-200 bg-white text-[11px] text-slate-400 dark:border-slate-800 dark:bg-slate-900">
                         No photo attached
@@ -550,6 +655,7 @@ export const ReportHazard: React.FC = () => {
                   value={addressQuery}
                   onChange={setAddressQuery}
                   onSelectPlace={(place) => {
+                    hasManuallyPickedRef.current = true;
                     setPickedCoords(place.coords);
                     setAddressQuery(place.address);
                   }}
@@ -565,6 +671,7 @@ export const ReportHazard: React.FC = () => {
                   userLocation={userLocation}
                   pickerPosition={pickedCoords}
                   onPickerChange={(coords) => {
+                    hasManuallyPickedRef.current = true;
                     setPickedCoords(coords);
                     if (!addressQuery) {
                       setAddressQuery(`Pin at ${formatCoords(coords)}`);
@@ -585,12 +692,43 @@ export const ReportHazard: React.FC = () => {
                 </span>
               </div>
 
+              {error && (
+                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-xs font-medium text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                  {error}
+                </div>
+              )}
+
+              {submittedReport && !error && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200">
+                  <span className="inline-flex items-center gap-1.5 font-semibold">
+                    <CheckCircle2 size={14} className="text-emerald-600 dark:text-emerald-400" />
+                    Report "{submittedReport.title}" added to the live map!
+                  </span>
+                  <Link
+                    to="/explore"
+                    className="font-bold text-emerald-700 hover:underline dark:text-emerald-300"
+                  >
+                    View on Map →
+                  </Link>
+                </div>
+              )}
+
               <button
                 type="submit"
-                className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-[#2563EB] py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
+                disabled={isSubmitting}
+                className="mt-5 flex w-full items-center justify-center gap-2 rounded-lg bg-[#2563EB] py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <AlertTriangle size={16} />
-                Submit Hazard Report
+                {isSubmitting ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    Submitting Report...
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle size={16} />
+                    Submit Hazard Report
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -604,7 +742,7 @@ export const ReportHazard: React.FC = () => {
                   Your Submitted Hazard Reports
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Manage or delete reports you have submitted.
+                  Saved permanently on the live map until resolved by Admin.
                 </p>
               </div>
               <Link
@@ -645,33 +783,13 @@ export const ReportHazard: React.FC = () => {
                       </div>
                     </div>
 
-                    {confirmDeleteId === report.id ? (
-                      <div className="inline-flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => void handleDeleteReport(report)}
-                          className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
-                        >
-                          Confirm Delete
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteId(null)}
-                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeleteId(report.id)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/70"
-                      >
-                        <Trash2 size={13} />
-                        Delete
-                      </button>
-                    )}
+                    <span className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                      {report.status === 'Resolved'
+                        ? 'Resolved & Removed from Map'
+                        : report.status === 'Rejected'
+                        ? 'Rejected by Admin'
+                        : 'Active on Map'}
+                    </span>
                   </div>
                 );
               })}

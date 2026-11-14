@@ -130,6 +130,33 @@ export const PlaceSearchInput: React.FC<PlaceSearchInputProps> = ({
             onChange(e.target.value);
             setOpen(true);
           }}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            if (coordMatch) {
+              const lat = Number(coordMatch[1]);
+              const lng = Number(coordMatch[2]);
+              onSelectPlace({
+                label: `${lat.toFixed(5)}, ${lng.toFixed(5)}`,
+                address: `Custom Coordinates (${lat.toFixed(5)}, ${lng.toFixed(5)})`,
+                coords: { lat, lng },
+              });
+              setOpen(false);
+              return;
+            }
+            const firstMatch = osmResults[0] ?? (presetMatches[0]
+              ? {
+                  label: presetMatches[0].name,
+                  address: presetMatches[0].address,
+                  coords: presetMatches[0].coords,
+                }
+              : null);
+            if (firstMatch) {
+              onChange(firstMatch.label);
+              onSelectPlace(firstMatch);
+              setOpen(false);
+            }
+          }}
           placeholder={
             placeholder ?? 'Search OpenStreetMap places, streets, or lat, lng...'
           }

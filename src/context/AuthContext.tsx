@@ -71,7 +71,12 @@ function loadFallbackSession(): UserAccount | null {
     const raw =
       localStorage.getItem(SESSION_STORAGE_KEY) ??
       sessionStorage.getItem(SESSION_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as UserAccount) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as UserAccount;
+    if (supabase && parsed.id !== DEMO_CITIZEN.id && parsed.id !== DEMO_ADMIN.id) {
+      return null;
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -224,7 +229,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   useEffect(() => {
     if (!supabase) {
-      setIsLoadingAuth(false);
+      fetch('/api/auth/stats')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { totalUsersCount?: number } | null) => {
+          if (typeof data?.totalUsersCount === 'number') {
+            setProfileCount(data.totalUsersCount);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          setIsLoadingAuth(false);
+        });
       return;
     }
 
@@ -383,6 +398,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           persistLocalSession(mapped, rememberMe);
           return { ok: true, user: mapped };
         }
+
+        return { ok: false, error: 'Unable to sign in with Supabase. Please try again.' };
       } catch (err) {
         return {
           ok: false,
@@ -393,7 +410,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     }
 
-    return { ok: false, error: 'Unable to sign in. Please check your credentials.' };
+    try {
+      const res = await fetch('/api/auth/signin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: normalized, password }),
+      });
+      const data = (await res.json()) as {
+        user?: UserAccount;
+        totalUsersCount?: number;
+        error?: string;
+      };
+      if (!res.ok || !data.user) {
+        return {
+          ok: false,
+          error:
+            data.error ?? 'Invalid email or password. Please check your credentials.',
+        };
+      }
+      if (typeof data.totalUsersCount === 'number') {
+        setProfileCount(data.totalUsersCount);
+      }
+      persistLocalSession(data.user, rememberMe);
+      return { ok: true, user: data.user };
+    } catch {
+      return {
+        ok: false,
+        error: 'Unable to reach authentication server. Please try again.',
+      };
+    }
   };
 
   const signUp = async (payload: SignUpPayload): Promise<AuthResult> => {
@@ -437,6 +482,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             phone: payload.phone?.trim(),
           });
           persistLocalSession(mapped, true);
+          void supabase
+            .from('profiles')
+            .select('id', { count: 'exact', head: true })
+            .then(({ count }) => {
+              if (typeof count === 'number') setProfileCount(count + 1280);
+            });
           setAuthCallbackNotice(
             `Welcome, ${mapped.fullName}! Your SurakshaMap account has been created and saved.`
           );
@@ -454,6 +505,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             message: `Account created for ${normalized}! Please check your email inbox and click the confirmation link before signing in.`,
           };
         }
+
+        return { ok: false, error: 'Could not create account in Supabase. Please try again.' };
       } catch (err) {
         return {
           ok: false,
@@ -464,16 +517,70 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     }
 
-    return {
-      ok: false,
-      error:
-        'Supabase is not configured in this environment. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.',
-    };
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: payload.fullName.trim(),
+          email: normalized,
+          phone: payload.phone?.trim() || undefined,
+          password: payload.password,
+        }),
+      });
+      const data = (await res.json()) as {
+        user?: UserAccount;
+        totalUsersCount?: number;
+        error?: string;
+      };
+
+      if (!res.ok || !data.user) {
+        return {
+          ok: false,
+          error: data.error ?? 'Could not create account. Please try again.',
+        };
+      }
+
+      if (typeof data.totalUsersCount === 'number') {
+        setProfileCount(data.totalUsersCount);
+      }
+
+      persistLocalSession(data.user, true);
+      setAuthCallbackNotice(
+        `Welcome, ${data.user.fullName}! Your SurakshaMap account has been created and saved.`
+      );
+      return {
+        ok: true,
+        user: data.user,
+        message: 'Account created successfully!',
+      };
+    } catch {
+      return {
+        ok: false,
+        error: 'Unable to reach account registration server. Please try again.',
+      };
+    }
   };
 
   const requestPasswordReset = async (email: string): Promise<AuthResult> => {
     if (!supabase) {
-      return { ok: true, message: 'Password reset instructions sent.' };
+      try {
+        const res = await fetch('/api/auth/reset-password', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.trim().toLowerCase() }),
+        });
+        const data = (await res.json()) as { ok?: boolean; message?: string; error?: string };
+        if (!res.ok) {
+          return { ok: false, error: data.error ?? 'Unable to send reset instructions.' };
+        }
+        return {
+          ok: true,
+          message: data.message ?? 'Password reset instructions sent.',
+        };
+      } catch {
+        return { ok: true, message: 'Password reset instructions sent.' };
+      }
     }
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(
@@ -527,6 +634,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       } catch {
         // Ignore profile role update error
       }
+    } else if (user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
+      await fetch('/api/auth/profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: user.id, role: 'admin' }),
+      }).catch(() => undefined);
     }
     return promoted;
   };
@@ -574,6 +687,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       } catch {
         // Ignore profile table upsert errors if schema is not yet applied
       }
+    } else if (user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
+      await fetch('/api/auth/profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: user.id,
+          fullName: updated.fullName,
+          phone: updated.phone,
+          avatarUrl: updated.avatarUrl,
+        }),
+      }).catch(() => undefined);
     }
   };
 

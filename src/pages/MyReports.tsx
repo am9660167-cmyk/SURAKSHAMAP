@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertTriangle, MapPin, Trash2 } from 'lucide-react';
+import { AlertTriangle, MapPin, ShieldCheck } from 'lucide-react';
 import { CategoryIcon } from '../components/CategoryIcon';
 import { SidebarLayout } from '../components/Sidebar';
 import { useAuth } from '../context/AuthContext';
@@ -16,10 +16,8 @@ import { formatCoords } from '../utils/location';
 
 export const MyReports: React.FC = () => {
   const { user } = useAuth();
-  const { hazards, deleteHazardReport } = useSafetyData();
+  const { hazards } = useSafetyData();
   const [statusFilter, setStatusFilter] = useState<ReportStatus | 'All'>('All');
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [deletedMessage, setDeletedMessage] = useState<string | null>(null);
 
   const actorId = user?.id ?? 'user-demo-1';
 
@@ -68,19 +66,6 @@ export const MyReports: React.FC = () => {
             Submit New Report
           </Link>
         </div>
-
-        {deletedMessage && (
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-medium text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
-            <span>{deletedMessage}</span>
-            <button
-              type="button"
-              onClick={() => setDeletedMessage(null)}
-              className="font-semibold text-[#2563EB] hover:underline"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
 
         {userReports.length === 0 ? (
           <div className="rounded-xl border border-slate-200 bg-white p-12 text-center dark:border-slate-800 dark:bg-slate-900">
@@ -151,42 +136,21 @@ export const MyReports: React.FC = () => {
                       </span>
                     </div>
 
-                    <div className="mt-3 flex items-center justify-end border-t border-slate-100 pt-3 dark:border-slate-800">
-                      {confirmDeleteId === report.id ? (
-                        <div className="inline-flex items-center gap-2">
-                          <span className="text-xs text-slate-500 dark:text-slate-400">
-                            Delete this report?
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              void deleteHazardReport(report.id).then(() => {
-                                setConfirmDeleteId(null);
-                                setDeletedMessage(`Deleted "${report.title}".`);
-                              });
-                            }}
-                            className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
-                          >
-                            Confirm Delete
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeleteId(null)}
-                            className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setConfirmDeleteId(report.id)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/70"
-                        >
-                          <Trash2 size={13} />
-                          Delete Report
-                        </button>
-                      )}
+                    <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-3 text-xs dark:border-slate-800">
+                      <span className="inline-flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-400">
+                        <ShieldCheck size={14} className="text-[#2563EB]" />
+                        {report.status === 'Resolved'
+                          ? 'Resolved by Admin · Removed from live map'
+                          : report.status === 'Rejected'
+                          ? 'Rejected by Admin · Hidden from live map'
+                          : 'Saved permanently on map until resolved by Admin'}
+                      </span>
+                      <Link
+                        to="/explore"
+                        className="shrink-0 font-semibold text-[#2563EB] hover:underline dark:text-blue-400"
+                      >
+                        View Map →
+                      </Link>
                     </div>
                   </div>
                 </article>

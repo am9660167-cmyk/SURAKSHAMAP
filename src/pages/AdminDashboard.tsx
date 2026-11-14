@@ -106,7 +106,7 @@ export const AdminDashboard: React.FC = () => {
 
   const handleDelete = async (report: HazardReport) => {
     ensureAdminSession();
-    await deleteHazardReport(report.id);
+    await deleteHazardReport(report.id, true);
     setConfirmDeleteId(null);
     setActionFeedback(`Deleted "${report.title}" from SurakshaMap.`);
   };

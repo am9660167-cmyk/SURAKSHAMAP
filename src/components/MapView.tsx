@@ -28,7 +28,9 @@ import {
 import {
   buildSimulatedRoutePaths,
   calculateBearingDegrees,
+  computePerpendicularBypassWaypoints,
   DEFAULT_MAP_CENTER,
+  distancePointToPolylineKm,
   formatCoords,
   formatDistance,
   haversineDistanceKm,
@@ -41,6 +43,7 @@ export interface ComputedRouteSummary {
   distanceMeters: number;
   durationMillis: number;
   path: Coordinates[];
+  isSafeDetour?: boolean;
 }
 
 interface MapViewProps {
@@ -58,6 +61,8 @@ interface MapViewProps {
   routeDestination?: Coordinates | null;
   travelMode?: TravelMode;
   selectedRouteIndex?: number;
+  recommendedSafeRouteIndex?: number | null;
+  onSelectRoute?: (index: number) => void;
   onRoutesComputed?: (routes: ComputedRouteSummary[]) => void;
   navigationPosition?: Coordinates | null;
   navigationHeading?: number | null;
@@ -231,9 +236,13 @@ function buildFallbackRoutes(
   destination: Coordinates,
   travelMode: TravelMode
 ): ComputedRouteSummary[] {
-  const { primary, alternative } = buildSimulatedRoutePaths(origin, destination);
+  const { primary, alternative, secondaryAlternative } = buildSimulatedRoutePaths(
+    origin,
+    destination
+  );
   const baseKm = Math.max(1.2, haversineDistanceKm(origin, destination) * 1.24);
-  const altKm = baseKm * 1.15;
+  const altKm = baseKm * 1.14;
+  const alt2Km = baseKm * 1.21;
   const speedKmh =
     travelMode === 'WALKING' ? 4.8 : travelMode === 'BICYCLING' ? 16 : 30;
 
@@ -247,12 +256,71 @@ function buildFallbackRoutes(
     },
     {
       index: 1,
-      label: 'Alternative Route',
+      label: 'Alternative Route 1',
       distanceMeters: Math.round(altKm * 1000),
       durationMillis: Math.round((altKm / speedKmh) * 3600000),
       path: alternative,
     },
+    {
+      index: 2,
+      label: 'Alternative Route 2',
+      distanceMeters: Math.round(alt2Km * 1000),
+      durationMillis: Math.round((alt2Km / speedKmh) * 3600000),
+      path: secondaryAlternative,
+    },
   ];
+}
+
+interface RawOsrmRoute {
+  distance?: number;
+  duration?: number;
+  geometry?: { coordinates?: [number, number][] };
+}
+
+function mapRawOsrmRoute(
+  r: RawOsrmRoute,
+  index: number,
+  label: string,
+  origin: Coordinates,
+  destination: Coordinates,
+  travelMode: TravelMode,
+  isSafeDetour = false
+): ComputedRouteSummary {
+  const coords: Coordinates[] = (r.geometry?.coordinates ?? []).map(([lng, lat]) => ({
+    lat,
+    lng,
+  }));
+  const distanceMeters = Math.round(
+    r.distance ?? haversineDistanceKm(origin, destination) * 1000
+  );
+  const speedScaleKmh =
+    travelMode === 'WALKING' ? 4.8 : travelMode === 'BICYCLING' ? 16 : null;
+  const durationMillis = speedScaleKmh
+    ? Math.round((distanceMeters / 1000 / speedScaleKmh) * 3600000)
+    : Math.round((r.duration ?? 600) * 1000);
+
+  return {
+    index,
+    label,
+    distanceMeters,
+    durationMillis,
+    path: coords.length >= 2 ? coords : [origin, destination],
+    isSafeDetour,
+  };
+}
+
+function isDuplicateRoute(
+  existing: ComputedRouteSummary[],
+  candidate: ComputedRouteSummary
+): boolean {
+  const candMid = candidate.path[Math.floor(candidate.path.length / 2)] ?? candidate.path[0];
+  return existing.some((item) => {
+    const itemMid = item.path[Math.floor(item.path.length / 2)] ?? item.path[0];
+    const distDiff = Math.abs(item.distanceMeters - candidate.distanceMeters);
+    const midSepKm =
+      candMid && itemMid ? haversineDistanceKm(candMid, itemMid) : Infinity;
+    return distDiff < 75 && midSepKm < 0.08;
+  });
 }
 
 const LocateControl: React.FC<{
@@ -301,6 +369,8 @@ export const MapView: React.FC<MapViewProps> = ({
   routeDestination,
   travelMode = 'DRIVING',
   selectedRouteIndex = 0,
+  recommendedSafeRouteIndex = null,
+  onSelectRoute,
   onRoutesComputed,
   navigationPosition,
   navigationHeading,
@@ -322,12 +392,16 @@ export const MapView: React.FC<MapViewProps> = ({
   const onPickerChangeRef = useRef(onPickerChange);
   const onMapClickRef = useRef(onMapClick);
   const onSelectHazardRef = useRef(onSelectHazard);
+  const onSelectRouteRef = useRef(onSelectRoute);
   const onRoutesComputedRef = useRef(onRoutesComputed);
+  const isNavigatingRef = useRef(isNavigating);
 
   onPickerChangeRef.current = onPickerChange;
   onMapClickRef.current = onMapClick;
   onSelectHazardRef.current = onSelectHazard;
+  onSelectRouteRef.current = onSelectRoute;
   onRoutesComputedRef.current = onRoutesComputed;
+  isNavigatingRef.current = isNavigating;
 
   const [internalSelected, setInternalSelected] = useState<HazardReport | null>(null);
   const [viewCenter, setViewCenter] = useState<Coordinates>(center);
@@ -336,6 +410,7 @@ export const MapView: React.FC<MapViewProps> = ({
   const [internalAlignHeading, setInternalAlignHeading] = useState<boolean>(false);
   const [computedRoutes, setComputedRoutes] = useState<ComputedRouteSummary[]>([]);
   const lastPanPosRef = useRef<Coordinates | null>(null);
+  const queriedBypassIdsRef = useRef<Set<string>>(new Set());
 
   const isAlignToHeading =
     alignToHeading !== undefined ? alignToHeading : internalAlignHeading;
@@ -437,6 +512,8 @@ export const MapView: React.FC<MapViewProps> = ({
   const visibleHazards = hazards.filter(
     (h) => h.status !== 'Rejected' && (allowResolvedPin || h.status !== 'Resolved')
   );
+  const visibleHazardsRef = useRef<HazardReport[]>(visibleHazards);
+  visibleHazardsRef.current = visibleHazards;
 
   // Close popup automatically if the selected hazard was resolved or deleted
   useEffect(() => {
@@ -533,8 +610,10 @@ export const MapView: React.FC<MapViewProps> = ({
     Boolean(onPickerChange),
   ]);
 
-  // Fetch OpenStreetMap OSRM Routes when routeOrigin & routeDestination exist
+  // Fetch OpenStreetMap OSRM Routes (plus hazard-bypass detours) when routeOrigin & routeDestination exist
   useEffect(() => {
+    queriedBypassIdsRef.current.clear();
+
     if (!routeOrigin || !routeDestination) {
       setComputedRoutes([]);
       return;
@@ -542,7 +621,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
     let cancelled = false;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6500);
+    const timeoutId = setTimeout(() => controller.abort(), 7500);
 
     const osrmProfile =
       travelMode === 'WALKING'
@@ -551,66 +630,117 @@ export const MapView: React.FC<MapViewProps> = ({
         ? 'bike'
         : 'driving';
 
+    const fetchWaypointDetours = async (
+      blockingHazard: HazardReport
+    ): Promise<ComputedRouteSummary[]> => {
+      queriedBypassIdsRef.current.add(blockingHazard.id);
+      const waypoints = computePerpendicularBypassWaypoints(
+        routeOrigin,
+        routeDestination,
+        blockingHazard.location,
+        1.35
+      );
+      const responses = await Promise.allSettled(
+        waypoints.map(async (wp) => {
+          const wpUrl = `https://router.project-osrm.org/route/v1/${osrmProfile}/${routeOrigin.lng},${routeOrigin.lat};${wp.lng},${wp.lat};${routeDestination.lng},${routeDestination.lat}?overview=full&geometries=geojson`;
+          const res = await fetch(wpUrl, { signal: controller.signal });
+          if (!res.ok) return null;
+          const json = (await res.json()) as { routes?: RawOsrmRoute[] };
+          const first = Array.isArray(json?.routes) ? json.routes[0] : null;
+          return first ?? null;
+        })
+      );
+
+      const detours: ComputedRouteSummary[] = [];
+      for (const r of responses) {
+        if (r.status === 'fulfilled' && r.value) {
+          detours.push(
+            mapRawOsrmRoute(
+              r.value,
+              0,
+              'Safe Detour Option',
+              routeOrigin,
+              routeDestination,
+              travelMode,
+              true
+            )
+          );
+        }
+      }
+      return detours;
+    };
+
     const url = `https://router.project-osrm.org/route/v1/${osrmProfile}/${routeOrigin.lng},${routeOrigin.lat};${routeDestination.lng},${routeDestination.lat}?overview=full&geometries=geojson&alternatives=true`;
 
     fetch(url, { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('OSRM failed'))))
-      .then((data) => {
+      .then(async (data) => {
         if (cancelled) return;
-        const osrmRoutes = Array.isArray(data?.routes) ? data.routes : [];
+        const osrmRoutes: RawOsrmRoute[] = Array.isArray(data?.routes) ? data.routes : [];
         if (osrmRoutes.length === 0) {
           throw new Error('No OSRM routes returned');
         }
 
-        const speedScaleKmh =
-          travelMode === 'WALKING' ? 4.8 : travelMode === 'BICYCLING' ? 16 : null;
-
-        const mapped: ComputedRouteSummary[] = osrmRoutes.map(
-          (
-            r: {
-              distance?: number;
-              duration?: number;
-              geometry?: { coordinates?: [number, number][] };
-            },
-            idx: number
-          ) => {
-            const coords: Coordinates[] = (r.geometry?.coordinates ?? []).map(
-              ([lng, lat]) => ({ lat, lng })
-            );
-            const distanceMeters = Math.round(
-              r.distance ??
-                haversineDistanceKm(routeOrigin, routeDestination) * 1000
-            );
-            // Public OSRM server primarily profiles car speeds; scale time realistically for walking/cycling
-            const durationMillis = speedScaleKmh
-              ? Math.round(((distanceMeters / 1000) / speedScaleKmh) * 3600000)
-              : Math.round((r.duration ?? 600) * 1000);
-
-            return {
-              index: idx,
-              label: idx === 0 ? 'Primary Route' : `Alternative Route ${idx}`,
-              distanceMeters,
-              durationMillis,
-              path:
-                coords.length >= 2
-                  ? coords
-                  : [routeOrigin, routeDestination],
-            };
-          }
+        const mapped: ComputedRouteSummary[] = osrmRoutes.map((r, idx) =>
+          mapRawOsrmRoute(
+            r,
+            idx,
+            idx === 0 ? 'Primary Route' : `Alternative Route ${idx}`,
+            routeOrigin,
+            routeDestination,
+            travelMode,
+            false
+          )
         );
 
-        // Ensure at least one alternative option exists so route switching always works
+        // If any active hazard lies along/near Route 0, query street-level bypass routes around it
+        const primaryPath = mapped[0]?.path ?? [routeOrigin, routeDestination];
+        const blockingOnPrimary = visibleHazardsRef.current
+          .map((h) => ({
+            hazard: h,
+            distKm: distancePointToPolylineKm(h.location, primaryPath),
+          }))
+          .filter((item) => item.distKm <= 0.45)
+          .sort((a, b) => a.distKm - b.distKm)[0];
+
+        if (blockingOnPrimary) {
+          const detours = await fetchWaypointDetours(blockingOnPrimary.hazard);
+          if (cancelled) return;
+          let detourCount = 0;
+          for (const d of detours) {
+            if (!isDuplicateRoute(mapped, d)) {
+              detourCount += 1;
+              mapped.push({
+                ...d,
+                index: mapped.length,
+                label:
+                  detourCount === 1
+                    ? 'Safe Detour Option'
+                    : `Safe Detour Option ${detourCount}`,
+              });
+            }
+          }
+        }
+
+        // Ensure alternative options exist even if OSRM returns a single corridor
         if (mapped.length === 1) {
-          const fallbackAlt = buildFallbackRoutes(
+          const fallback = buildFallbackRoutes(
             routeOrigin,
             routeDestination,
             travelMode
-          )[1];
-          mapped.push({
-            ...fallbackAlt,
-            index: 1,
-            label: 'Alternative Route 1',
-          });
+          );
+          mapped.push(
+            {
+              ...fallback[1],
+              index: 1,
+              label: 'Alternative Route 1',
+            },
+            {
+              ...fallback[2],
+              index: 2,
+              label: 'Alternative Route 2',
+            }
+          );
         }
 
         setComputedRoutes(mapped);
@@ -643,6 +773,108 @@ export const MapView: React.FC<MapViewProps> = ({
     travelMode,
   ]);
 
+  // If a new hazard is added directly onto all current routes, fetch an OSRM bypass option dynamically
+  useEffect(() => {
+    if (!routeOrigin || !routeDestination || computedRoutes.length === 0) return;
+
+    const allRoutesImpacted = computedRoutes.every((route) =>
+      visibleHazards.some(
+        (h) => distancePointToPolylineKm(h.location, route.path) <= 0.38
+      )
+    );
+    if (!allRoutesImpacted) return;
+
+    const primaryPath = computedRoutes[0].path;
+    const unqueriedBlocking = visibleHazards.find(
+      (h) =>
+        !queriedBypassIdsRef.current.has(h.id) &&
+        distancePointToPolylineKm(h.location, primaryPath) <= 0.45
+    );
+    if (!unqueriedBlocking) return;
+
+    queriedBypassIdsRef.current.add(unqueriedBlocking.id);
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5500);
+    const osrmProfile =
+      travelMode === 'WALKING'
+        ? 'foot'
+        : travelMode === 'BICYCLING'
+        ? 'bike'
+        : 'driving';
+
+    const waypoints = computePerpendicularBypassWaypoints(
+      routeOrigin,
+      routeDestination,
+      unqueriedBlocking.location,
+      1.35
+    );
+
+    Promise.allSettled(
+      waypoints.map(async (wp) => {
+        const wpUrl = `https://router.project-osrm.org/route/v1/${osrmProfile}/${routeOrigin.lng},${routeOrigin.lat};${wp.lng},${wp.lat};${routeDestination.lng},${routeDestination.lat}?overview=full&geometries=geojson`;
+        const res = await fetch(wpUrl, { signal: controller.signal });
+        if (!res.ok) return null;
+        const json = (await res.json()) as { routes?: RawOsrmRoute[] };
+        return Array.isArray(json?.routes) ? json.routes[0] ?? null : null;
+      })
+    )
+      .then((results) => {
+        if (cancelled) return;
+        const additions: ComputedRouteSummary[] = [];
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value) {
+            const candidate = mapRawOsrmRoute(
+              r.value,
+              0,
+              'Safe Detour Option',
+              routeOrigin,
+              routeDestination,
+              travelMode,
+              true
+            );
+            if (!isDuplicateRoute([...computedRoutes, ...additions], candidate)) {
+              additions.push(candidate);
+            }
+          }
+        }
+        if (additions.length > 0) {
+          const updated = [
+            ...computedRoutes,
+            ...additions.map((d, i) => ({
+              ...d,
+              index: computedRoutes.length + i,
+              label:
+                additions.length === 1 && computedRoutes.every((c) => !c.isSafeDetour)
+                  ? 'Safe Detour Option'
+                  : `Safe Detour Option ${
+                      computedRoutes.filter((c) => c.isSafeDetour).length + i + 1
+                    }`,
+            })),
+          ];
+          setComputedRoutes(updated);
+          onRoutesComputedRef.current?.(updated);
+        }
+      })
+      .finally(() => {
+        clearTimeout(timer);
+      });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    visibleHazards.length,
+    computedRoutes,
+    routeOrigin?.lat,
+    routeOrigin?.lng,
+    routeDestination?.lat,
+    routeDestination?.lng,
+    travelMode,
+  ]);
+
   // Draw OpenStreetMap route polylines on Leaflet
   useEffect(() => {
     const group = routeLayerRef.current;
@@ -652,30 +884,65 @@ export const MapView: React.FC<MapViewProps> = ({
 
     if (computedRoutes.length === 0) return;
 
-    // Draw unselected routes first so selected route stays on top
-    const ordered = [...computedRoutes].sort((a, b) =>
-      a.index === selectedRouteIndex ? 1 : b.index === selectedRouteIndex ? -1 : 0
-    );
+    // Draw unselected normal routes first, recommended safe route above them, and selected route on top
+    const ordered = [...computedRoutes].sort((a, b) => {
+      const rank = (idx: number) =>
+        idx === selectedRouteIndex
+          ? 2
+          : recommendedSafeRouteIndex === idx
+          ? 1
+          : 0;
+      return rank(a.index) - rank(b.index);
+    });
 
     ordered.forEach((route) => {
       const isSelected = route.index === selectedRouteIndex;
+      const isRecommendedSafe = recommendedSafeRouteIndex === route.index;
       const latLngs: L.LatLngExpression[] = route.path.map((pt) => [pt.lat, pt.lng]);
-      L.polyline(latLngs, {
-        color: isSelected ? '#2563EB' : '#64748B',
-        weight: isSelected ? 6 : 4,
-        opacity: isSelected ? 0.92 : 0.6,
-        dashArray: isSelected ? undefined : '8 8',
-      }).addTo(group);
+
+      const color = isSelected
+        ? isRecommendedSafe
+          ? '#16A34A'
+          : '#2563EB'
+        : isRecommendedSafe
+        ? '#16A34A'
+        : '#64748B';
+
+      const polyline = L.polyline(latLngs, {
+        color,
+        weight: isSelected ? 6 : isRecommendedSafe ? 5 : 4,
+        opacity: isSelected ? 0.94 : isRecommendedSafe ? 0.85 : 0.55,
+        dashArray: isSelected ? undefined : isRecommendedSafe ? '10 6' : '8 8',
+      });
+
+      if (onSelectRouteRef.current) {
+        polyline.on('click', (e: L.LeafletMouseEvent) => {
+          L.DomEvent.stopPropagation(e);
+          onSelectRouteRef.current?.(route.index);
+        });
+      }
+
+      const kmLabel = `${(route.distanceMeters / 1000).toFixed(2)} km`;
+      const minLabel = `${Math.max(1, Math.round(route.durationMillis / 60000))} mins`;
+      const suffix = isRecommendedSafe ? ' · Optional Safe Route' : '';
+      polyline.bindTooltip(`${route.label} (${kmLabel}, ${minLabel})${suffix}`, {
+        sticky: true,
+        direction: 'top',
+      });
+
+      polyline.addTo(group);
     });
 
-    const target = computedRoutes[selectedRouteIndex] ?? computedRoutes[0];
-    if (target && target.path.length >= 2) {
-      const bounds = L.latLngBounds(
-        target.path.map((pt) => [pt.lat, pt.lng] as L.LatLngTuple)
-      );
-      map.fitBounds(bounds, { padding: [44, 44], maxZoom: 15 });
+    if (!isNavigatingRef.current) {
+      const target = computedRoutes[selectedRouteIndex] ?? computedRoutes[0];
+      if (target && target.path.length >= 2) {
+        const bounds = L.latLngBounds(
+          target.path.map((pt) => [pt.lat, pt.lng] as L.LatLngTuple)
+        );
+        map.fitBounds(bounds, { padding: [44, 44], maxZoom: 15 });
+      }
     }
-  }, [computedRoutes, selectedRouteIndex]);
+  }, [computedRoutes, selectedRouteIndex, recommendedSafeRouteIndex]);
 
   // Render & smoothly move the directional navigation cursor (starting position -> live location)
   useEffect(() => {

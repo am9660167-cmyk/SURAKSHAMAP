@@ -1,4 +1,4 @@
-import { Coordinates } from '../types/safety';
+import { Coordinates, HazardReport } from '../types/safety';
 
 export const DEFAULT_MAP_CENTER: Coordinates = {
   lat: 12.9716,
@@ -318,10 +318,11 @@ export async function reverseGeocodeOsm(coords: Coordinates): Promise<string | n
 export function buildSimulatedRoutePaths(
   origin: Coordinates,
   destination: Coordinates
-): { primary: Coordinates[]; alternative: Coordinates[] } {
+): { primary: Coordinates[]; alternative: Coordinates[]; secondaryAlternative: Coordinates[] } {
   const steps = 14;
   const primary: Coordinates[] = [];
   const alternative: Coordinates[] = [];
+  const secondaryAlternative: Coordinates[] = [];
 
   const dLat = destination.lat - origin.lat;
   const dLng = destination.lng - origin.lng;
@@ -332,6 +333,7 @@ export function buildSimulatedRoutePaths(
     const t = i / steps;
     const wave1 = Math.sin(t * Math.PI) * 0.08;
     const wave2 = Math.sin(t * Math.PI) * -0.18;
+    const wave3 = Math.sin(t * Math.PI) * 0.24;
 
     primary.push({
       lat: origin.lat + dLat * t + perpLat * wave1,
@@ -341,9 +343,108 @@ export function buildSimulatedRoutePaths(
       lat: origin.lat + dLat * t + perpLat * wave2,
       lng: origin.lng + dLng * t + perpLng * wave2,
     });
+    secondaryAlternative.push({
+      lat: origin.lat + dLat * t + perpLat * wave3,
+      lng: origin.lng + dLng * t + perpLng * wave3,
+    });
   }
 
-  return { primary, alternative };
+  return { primary, alternative, secondaryAlternative };
+}
+
+export interface RouteHazardEvaluation {
+  onRouteCount: number;
+  corridorCount: number;
+  criticalCount: number;
+  highCount: number;
+  riskScore: number;
+  nearestHazardKm: number | null;
+}
+
+const SEVERITY_RISK_WEIGHT: Record<HazardReport['severity'], number> = {
+  Critical: 40,
+  High: 20,
+  Medium: 10,
+  Low: 5,
+};
+
+export function evaluateRouteHazards(
+  path: Coordinates[],
+  hazards: HazardReport[],
+  onRouteRadiusKm = 0.35,
+  corridorRadiusKm = 1.5
+): RouteHazardEvaluation {
+  let onRouteCount = 0;
+  let corridorCount = 0;
+  let criticalCount = 0;
+  let highCount = 0;
+  let riskScore = 0;
+  let nearestHazardKm: number | null = null;
+
+  const active = hazards.filter(
+    (h) => h.status !== 'Rejected' && h.status !== 'Resolved'
+  );
+
+  for (const hazard of active) {
+    const distKm = distancePointToPolylineKm(hazard.location, path);
+    if (nearestHazardKm === null || distKm < nearestHazardKm) {
+      nearestHazardKm = distKm;
+    }
+
+    const weight = SEVERITY_RISK_WEIGHT[hazard.severity] ?? 10;
+
+    if (distKm <= onRouteRadiusKm) {
+      onRouteCount += 1;
+      corridorCount += 1;
+      if (hazard.severity === 'Critical') criticalCount += 1;
+      if (hazard.severity === 'High') highCount += 1;
+      riskScore += weight * 2;
+    } else if (distKm <= corridorRadiusKm) {
+      corridorCount += 1;
+      riskScore += Math.round(weight * 0.4);
+    }
+  }
+
+  return {
+    onRouteCount,
+    corridorCount,
+    criticalCount,
+    highCount,
+    riskScore,
+    nearestHazardKm,
+  };
+}
+
+export function computePerpendicularBypassWaypoints(
+  origin: Coordinates,
+  destination: Coordinates,
+  hazardPoint: Coordinates,
+  offsetKm = 1.35
+): [Coordinates, Coordinates] {
+  const meanLatRad = ((origin.lat + destination.lat) / 2) * (Math.PI / 180);
+  const cosLat = Math.max(0.2, Math.cos(meanLatRad));
+
+  const dxKm = (destination.lng - origin.lng) * 111.32 * cosLat;
+  const dyKm = (destination.lat - origin.lat) * 111.32;
+  const lenKm = Math.hypot(dxKm, dyKm) || 1;
+
+  // Unit perpendicular vector in km-space
+  const pxKm = -dyKm / lenKm;
+  const pyKm = dxKm / lenKm;
+
+  const dLat = (pyKm * offsetKm) / 111.32;
+  const dLng = (pxKm * offsetKm) / (111.32 * cosLat);
+
+  const leftWaypoint: Coordinates = {
+    lat: Number((hazardPoint.lat + dLat).toFixed(6)),
+    lng: Number((hazardPoint.lng + dLng).toFixed(6)),
+  };
+  const rightWaypoint: Coordinates = {
+    lat: Number((hazardPoint.lat - dLat).toFixed(6)),
+    lng: Number((hazardPoint.lng - dLng).toFixed(6)),
+  };
+
+  return [leftWaypoint, rightWaypoint];
 }
 
 export function calculateBearingDegrees(from: Coordinates, to: Coordinates): number {

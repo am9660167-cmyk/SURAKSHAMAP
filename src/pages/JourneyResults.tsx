@@ -11,6 +11,7 @@ import {
   Navigation,
   Play,
   Route,
+  ShieldCheck,
   Square,
   Upload,
   X,
@@ -37,6 +38,7 @@ import {
 import {
   calculateBearingDegrees,
   distancePointToPolylineKm,
+  evaluateRouteHazards,
   formatCoords,
   formatDistance,
   haversineDistanceKm,
@@ -58,6 +60,8 @@ export const JourneyResults: React.FC = () => {
   const [routes, setRoutes] = useState<ComputedRouteSummary[]>([]);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
   const [selectedHazard, setSelectedHazard] = useState<HazardReport | null>(null);
+  const [dismissedForRouteIndex, setDismissedForRouteIndex] = useState<number | null>(null);
+  const [routeChoiceFeedback, setRouteChoiceFeedback] = useState<string | null>(null);
 
   // Live Navigation Cursor State (starts at starting position)
   const [navMode, setNavMode] = useState<NavigationMode>('idle');
@@ -86,6 +90,19 @@ export const JourneyResults: React.FC = () => {
 
   const activeRoute = routes[selectedRouteIndex] ?? routes[0] ?? null;
   const isNavigating = navMode !== 'idle';
+
+  // Reset route choice prompt when origin/destination/mode changes
+  useEffect(() => {
+    setSelectedRouteIndex(0);
+    setDismissedForRouteIndex(null);
+    setRouteChoiceFeedback(null);
+  }, [
+    journeyRequest.originCoords.lat,
+    journeyRequest.originCoords.lng,
+    journeyRequest.destinationCoords.lat,
+    journeyRequest.destinationCoords.lng,
+    journeyRequest.travelMode,
+  ]);
 
   // Reset cursor to starting position whenever journey origin changes while idle
   useEffect(() => {
@@ -241,21 +258,88 @@ export const JourneyResults: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [navMode, activeRoute, journeyRequest.originCoords, journeyRequest.destinationCoords]);
 
-  // Compute all hazards within 1.5 km of the selected route path
+  const activeHazards = useMemo(
+    () => hazards.filter((h) => h.status !== 'Rejected' && h.status !== 'Resolved'),
+    [hazards]
+  );
+
+  // Compute all hazards within 1.8 km of the selected route path
   const routeHazards = useMemo(() => {
     const activePath = activeRoute?.path ?? [
       journeyRequest.originCoords,
       journeyRequest.destinationCoords,
     ];
-    return hazards
-      .filter((h) => h.status !== 'Rejected' && h.status !== 'Resolved')
+    return activeHazards
       .map((h) => ({
         hazard: h,
         distanceKm: distancePointToPolylineKm(h.location, activePath),
       }))
       .filter((item) => item.distanceKm <= 1.8)
       .sort((a, b) => a.distanceKm - b.distanceKm);
-  }, [hazards, activeRoute, journeyRequest]);
+  }, [activeHazards, activeRoute, journeyRequest]);
+
+  // Evaluate every computed route option for on-path & corridor hazards
+  const evaluatedRoutes = useMemo(() => {
+    return routes.map((route) => ({
+      route,
+      eval: evaluateRouteHazards(route.path, activeHazards, 0.35, 1.5),
+    }));
+  }, [routes, activeHazards]);
+
+  const currentRouteEval =
+    evaluatedRoutes.find((item) => item.route.index === selectedRouteIndex) ??
+    evaluatedRoutes[0] ??
+    null;
+
+  const currentHasHazards =
+    (currentRouteEval?.eval.onRouteCount ?? 0) > 0 || routeHazards.length > 0;
+
+  // Suggest the shortest safer alternative route (optional — user chooses whether to switch)
+  const recommendedSafeRoute = useMemo(() => {
+    if (!currentRouteEval || evaluatedRoutes.length <= 1) return null;
+    const cur = currentRouteEval.eval;
+    if (cur.onRouteCount === 0 && cur.corridorCount === 0 && routeHazards.length === 0) {
+      return null;
+    }
+
+    const saferCandidates = evaluatedRoutes.filter((item) => {
+      if (item.route.index === currentRouteEval.route.index) return false;
+      const cand = item.eval;
+      return (
+        cand.onRouteCount < cur.onRouteCount ||
+        (cand.onRouteCount === cur.onRouteCount && cand.riskScore < cur.riskScore) ||
+        (cand.onRouteCount === cur.onRouteCount &&
+          cand.riskScore === cur.riskScore &&
+          cand.corridorCount < cur.corridorCount)
+      );
+    });
+
+    if (saferCandidates.length === 0) return null;
+
+    const zeroOnRoute = saferCandidates.filter((c) => c.eval.onRouteCount === 0);
+    const pool = zeroOnRoute.length > 0 ? zeroOnRoute : saferCandidates;
+
+    return [...pool].sort((a, b) => {
+      if (a.route.distanceMeters !== b.route.distanceMeters) {
+        return a.route.distanceMeters - b.route.distanceMeters;
+      }
+      return a.eval.riskScore - b.eval.riskScore;
+    })[0];
+  }, [currentRouteEval, evaluatedRoutes, routeHazards.length]);
+
+  const handleSelectRoute = (index: number, feedback?: string) => {
+    setSelectedRouteIndex(index);
+    setDismissedForRouteIndex(null);
+    if (navMode === 'sim') {
+      simProgressRef.current = 0;
+      setSimProgress(0);
+    }
+    if (feedback) {
+      setRouteChoiceFeedback(feedback);
+    } else {
+      setRouteChoiceFeedback(null);
+    }
+  };
 
   // Nearest active hazard ahead/near the moving cursor (within 500 m)
   const nearbyCursorHazard = useMemo(() => {
@@ -306,7 +390,7 @@ export const JourneyResults: React.FC = () => {
     reader.readAsDataURL(file);
   };
 
-  const handleQuickReportSubmit = (e: React.FormEvent) => {
+  const handleQuickReportSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!reportCoords) return;
     if (quickDescription.trim().length < 6) {
@@ -314,24 +398,30 @@ export const JourneyResults: React.FC = () => {
       return;
     }
 
-    const created = addHazardReport({
-      title: `${quickCategory} near route corridor`,
-      category: quickCategory,
-      description: quickDescription,
-      severity: quickSeverity,
-      location: reportCoords,
-      address: `Route Corridor (${formatCoords(reportCoords)})`,
-      photoUrl: quickPhotoUrl,
-      reportedBy: user?.fullName ?? 'Route Contributor',
-      reporterId: user?.id ?? 'guest-citizen',
-    });
+    try {
+      const created = await addHazardReport({
+        title: `${quickCategory} near route corridor`,
+        category: quickCategory,
+        description: quickDescription,
+        severity: quickSeverity,
+        location: reportCoords,
+        address: `Route Corridor (${formatCoords(reportCoords)})`,
+        photoUrl: quickPhotoUrl,
+        reportedBy: user?.fullName ?? 'Route Contributor',
+        reporterId: user?.id ?? 'guest-citizen',
+      });
 
-    setSelectedHazard(created);
-    setJustReportedTitle(created.title);
-    setReportCoords(null);
-    setQuickDescription('');
-    setQuickPhotoUrl(undefined);
-    setQuickError('');
+      setSelectedHazard(created);
+      setJustReportedTitle(created.title);
+      setReportCoords(null);
+      setQuickDescription('');
+      setQuickPhotoUrl(undefined);
+      setQuickError('');
+    } catch (err) {
+      setQuickError(
+        err instanceof Error ? err.message : 'Unable to save hazard report.'
+      );
+    }
   };
 
   const midCenter: Coordinates = {
@@ -501,6 +591,125 @@ export const JourneyResults: React.FC = () => {
           </div>
         )}
 
+        {/* Optional Shorter Safe Alternative Route Banner (User Choice) */}
+        {currentHasHazards &&
+          recommendedSafeRoute &&
+          currentRouteEval &&
+          dismissedForRouteIndex !== selectedRouteIndex && (
+            <div className="rounded-xl border border-emerald-300 bg-emerald-50/90 p-4 dark:border-emerald-800 dark:bg-emerald-950/40">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                      <ShieldCheck size={12} />
+                      Optional Safe Alternative
+                    </span>
+                    <span className="text-xs font-bold text-[#14213D] dark:text-white">
+                      Hazard detected on {currentRouteEval.route.label} — shorter safe route suggested
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-700 dark:text-slate-300">
+                    {currentRouteEval.eval.onRouteCount > 0 ? (
+                      <>
+                        Your current path passes{' '}
+                        <strong className="text-red-700 dark:text-red-400">
+                          {currentRouteEval.eval.onRouteCount}{' '}
+                          {currentRouteEval.eval.onRouteCount === 1 ? 'hazard' : 'hazards'}
+                        </strong>
+                        .{' '}
+                      </>
+                    ) : (
+                      <>
+                        Your current corridor has{' '}
+                        <strong className="text-amber-700 dark:text-amber-400">
+                          {routeHazards.length} nearby{' '}
+                          {routeHazards.length === 1 ? 'hazard' : 'hazards'}
+                        </strong>
+                        .{' '}
+                      </>
+                    )}
+                    <strong className="text-emerald-800 dark:text-emerald-300">
+                      {recommendedSafeRoute.route.label}
+                    </strong>{' '}
+                    is{' '}
+                    <span className="font-mono font-semibold">
+                      {(recommendedSafeRoute.route.distanceMeters / 1000).toFixed(2)} km
+                    </span>{' '}
+                    (
+                    {(() => {
+                      const diffKm =
+                        (recommendedSafeRoute.route.distanceMeters -
+                          currentRouteEval.route.distanceMeters) /
+                        1000;
+                      if (Math.abs(diffKm) < 0.05) return 'similar distance';
+                      return diffKm > 0
+                        ? `+${diffKm.toFixed(2)} km detour`
+                        : `${Math.abs(diffKm).toFixed(2)} km shorter`;
+                    })()}
+                    ,{' '}
+                    {Math.max(
+                      1,
+                      Math.round(recommendedSafeRoute.route.durationMillis / 60000)
+                    )}{' '}
+                    mins) with{' '}
+                    <strong className="text-emerald-800 dark:text-emerald-300">
+                      {recommendedSafeRoute.eval.onRouteCount === 0
+                        ? '0 hazards on path'
+                        : `${recommendedSafeRoute.eval.onRouteCount} hazard(s) on path`}
+                    </strong>
+                    . You can choose whether to switch or stay.
+                  </p>
+                </div>
+
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSelectRoute(
+                        recommendedSafeRoute.route.index,
+                        `Switched to optional safe route "${recommendedSafeRoute.route.label}" (${(
+                          recommendedSafeRoute.route.distanceMeters / 1000
+                        ).toFixed(2)} km).`
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-700"
+                  >
+                    <ShieldCheck size={14} />
+                    Switch to Safe Route
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDismissedForRouteIndex(selectedRouteIndex);
+                      setRouteChoiceFeedback(
+                        `Keeping "${currentRouteEval.route.label}". You can still switch to the green dashed safe route anytime.`
+                      );
+                    }}
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Keep Current Route
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+        {routeChoiceFeedback && (
+          <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+            <span className="inline-flex items-center gap-2 font-medium">
+              <ShieldCheck size={15} className="text-emerald-600 dark:text-emerald-400" />
+              {routeChoiceFeedback}
+            </span>
+            <button
+              type="button"
+              onClick={() => setRouteChoiceFeedback(null)}
+              className="font-semibold text-slate-500 hover:underline dark:text-slate-400"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {justReportedTitle && (
           <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300">
             <span className="inline-flex items-center gap-2 font-medium">
@@ -521,7 +730,7 @@ export const JourneyResults: React.FC = () => {
         <div className="grid gap-6 lg:grid-cols-12">
           <div className="space-y-4 lg:col-span-8">
             <MapView
-              hazards={routeHazards.map((r) => r.hazard)}
+              hazards={activeHazards}
               center={midCenter}
               zoom={13}
               userLocation={userLocation}
@@ -531,6 +740,12 @@ export const JourneyResults: React.FC = () => {
               routeDestination={journeyRequest.destinationCoords}
               travelMode={journeyRequest.travelMode}
               selectedRouteIndex={selectedRouteIndex}
+              recommendedSafeRouteIndex={
+                currentHasHazards && recommendedSafeRoute
+                  ? recommendedSafeRoute.route.index
+                  : null
+              }
+              onSelectRoute={(idx) => handleSelectRoute(idx)}
               onRoutesComputed={setRoutes}
               navigationPosition={cursorPosition}
               navigationHeading={cursorHeading}
@@ -546,7 +761,7 @@ export const JourneyResults: React.FC = () => {
               interactiveHint={
                 isNavigating
                   ? 'Navigation cursor active — tracking movement along your journey'
-                  : 'Blue arrow cursor marks your starting position · Click Start Journey to track movement'
+                  : 'Blue cursor marks start · Click any dashed route on map to switch paths'
               }
             />
 
@@ -639,38 +854,83 @@ export const JourneyResults: React.FC = () => {
           <aside className="space-y-5 lg:col-span-4">
             {/* Route Selector */}
             <div className="rounded-xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
-              <h2 className="text-sm font-bold text-[#14213D] dark:text-white">
-                Available Routes
-              </h2>
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-bold text-[#14213D] dark:text-white">
+                  Available Routes
+                </h2>
+                {currentRouteEval &&
+                  currentRouteEval.eval.onRouteCount === 0 &&
+                  !recommendedSafeRoute &&
+                  routes.length > 1 && (
+                    <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
+                      <ShieldCheck size={11} />
+                      Safest Path
+                    </span>
+                  )}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                Green dashed line marks an optional safer alternative. Choose any route.
+              </p>
+
               <div className="mt-3 space-y-2.5">
-                {routes.length === 0 ? (
+                {evaluatedRoutes.length === 0 ? (
                   <p className="text-xs text-slate-500">Computing route options...</p>
                 ) : (
-                  routes.map((r) => {
+                  evaluatedRoutes.map(({ route: r, eval: ev }) => {
                     const active = r.index === selectedRouteIndex;
+                    const isSuggestedSafe =
+                      currentHasHazards && recommendedSafeRoute?.route.index === r.index;
+
                     return (
                       <button
                         key={r.index}
                         type="button"
-                        onClick={() => setSelectedRouteIndex(r.index)}
-                        className={`flex w-full items-center justify-between rounded-lg border p-3 text-left transition-colors ${
+                        onClick={() => handleSelectRoute(r.index)}
+                        className={`flex w-full items-center justify-between gap-2 rounded-lg border p-3 text-left transition-colors ${
                           active
                             ? 'border-[#2563EB] bg-blue-50/70 dark:bg-blue-950/40'
+                            : isSuggestedSafe
+                            ? 'border-emerald-300 bg-emerald-50/60 hover:bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/25 dark:hover:bg-emerald-950/40'
                             : 'border-slate-200 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/50'
                         }`}
                       >
-                        <div>
-                          <div className="text-xs font-bold text-slate-900 dark:text-white">
-                            {r.label}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-xs font-bold text-slate-900 dark:text-white">
+                              {r.label}
+                            </span>
+                            {isSuggestedSafe && (
+                              <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                                Optional Safe · Shortest
+                              </span>
+                            )}
                           </div>
-                          <div className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums">
+                          <div className="mt-0.5 font-mono text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
                             {(r.distanceMeters / 1000).toFixed(2)} km ·{' '}
                             {Math.max(1, Math.round(r.durationMillis / 60000))} mins
                           </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+                            {ev.onRouteCount === 0 ? (
+                              <span className="font-semibold text-emerald-700 dark:text-emerald-400">
+                                0 hazards on path
+                                {ev.corridorCount > 0 ? ` (${ev.corridorCount} nearby)` : ''}
+                              </span>
+                            ) : (
+                              <span className="font-semibold text-red-600 dark:text-red-400">
+                                {ev.onRouteCount}{' '}
+                                {ev.onRouteCount === 1 ? 'hazard' : 'hazards'} on path
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        {active && (
+                        {active ? (
                           <Navigation size={15} className="shrink-0 text-[#2563EB]" />
-                        )}
+                        ) : isSuggestedSafe ? (
+                          <ShieldCheck
+                            size={16}
+                            className="shrink-0 text-emerald-600 dark:text-emerald-400"
+                          />
+                        ) : null}
                       </button>
                     );
                   })

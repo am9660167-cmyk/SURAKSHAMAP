@@ -1,4 +1,13 @@
+import dotenv from 'dotenv';
+if (process.env.VITE_SUPABASE_URL?.includes('YOUR_PROJECT_ID')) {
+  delete process.env.VITE_SUPABASE_URL;
+}
+if (process.env.VITE_SUPABASE_ANON_KEY?.includes('YOUR_SUPABASE')) {
+  delete process.env.VITE_SUPABASE_ANON_KEY;
+}
+dotenv.config();
 import express from 'express';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { INITIAL_HAZARDS } from './src/data/hazards.ts';
@@ -7,6 +16,7 @@ import type {
   HazardReport,
   NotificationItem,
   ReportStatus,
+  UserAccount,
 } from './src/types/safety.ts';
 
 interface SafetyStore {
@@ -14,9 +24,21 @@ interface SafetyStore {
   notifications: NotificationItem[];
 }
 
+interface StoredUserRecord {
+  user: UserAccount;
+  salt: string;
+  passwordHash: string;
+}
+
+interface UsersStore {
+  users: StoredUserRecord[];
+}
+
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const DATA_FILE = path.join(DATA_DIR, 'safety-store.json');
+const USERS_FILE = path.join(DATA_DIR, 'users-store.json');
 const PORT = Number(process.env.PORT) || 3000;
+const DEFAULT_AVATAR = '/src/assets/images/avatar_citizen_profile_1794641736396.jpg';
 
 function loadStore(): SafetyStore {
   try {
@@ -47,13 +69,57 @@ function saveStore(next: SafetyStore): void {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(DATA_FILE, JSON.stringify(next, null, 2), 'utf-8');
+    const tmpFile = `${DATA_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, DATA_FILE);
   } catch {
     // Ignore filesystem errors in read-only edge cases; in-memory state stays live
   }
 }
 
+function loadUsersStore(): UsersStore {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const raw = fs.readFileSync(USERS_FILE, 'utf-8');
+      const parsed = JSON.parse(raw) as Partial<UsersStore>;
+      if (Array.isArray(parsed.users)) {
+        return { users: parsed.users };
+      }
+    }
+  } catch {
+    // Initialize empty users store if missing or unreadable
+  }
+  const initial: UsersStore = { users: [] };
+  saveUsersStore(initial);
+  return initial;
+}
+
+function saveUsersStore(next: UsersStore): void {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const tmpFile = `${USERS_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, USERS_FILE);
+  } catch {
+    // Ignore filesystem write errors in read-only edge cases
+  }
+}
+
+function hashPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function verifyPassword(password: string, salt: string, expectedHash: string): boolean {
+  const actualBuf = Buffer.from(hashPassword(password, salt), 'hex');
+  const expectedBuf = Buffer.from(expectedHash, 'hex');
+  if (actualBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(actualBuf, expectedBuf);
+}
+
 let store: SafetyStore = loadStore();
+let usersStore: UsersStore = loadUsersStore();
 const sseClients = new Set<express.Response>();
 
 function broadcastSync(): void {
@@ -69,10 +135,169 @@ function broadcastSync(): void {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '25mb' }));
+
+  const getPublicSupabaseConfig = () => {
+    const rawUrl = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
+    const rawKey = (
+      process.env.VITE_SUPABASE_ANON_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+      process.env.SUPABASE_PUBLISHABLE_KEY ||
+      ''
+    ).trim();
+    const url = rawUrl && !rawUrl.includes('YOUR_PROJECT_ID') ? rawUrl : '';
+    const anonKey = rawKey && !rawKey.includes('YOUR_SUPABASE') ? rawKey : '';
+    return { url, anonKey };
+  };
+
+  app.get('/api/env.js', (_req, res) => {
+    const { url, anonKey } = getPublicSupabaseConfig();
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(`window.__SUPABASE_ENV__ = ${JSON.stringify({ url, anonKey })};`);
+  });
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true });
+    const { url, anonKey } = getPublicSupabaseConfig();
+    res.json({ ok: true, supabaseConfigured: Boolean(url && anonKey) });
+  });
+
+  app.get('/api/auth/stats', (_req, res) => {
+    res.json({ totalUsersCount: 1280 + usersStore.users.length });
+  });
+
+  app.post('/api/auth/signup', (req, res) => {
+    const body = (req.body ?? {}) as {
+      fullName?: string;
+      email?: string;
+      phone?: string;
+      password?: string;
+    };
+    const fullName = body.fullName?.trim() ?? '';
+    const email = body.email?.trim().toLowerCase() ?? '';
+    const phone = body.phone?.trim() || undefined;
+    const password = body.password ?? '';
+
+    if (!fullName) {
+      res.status(400).json({ error: 'Please enter your full name.' });
+      return;
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: 'Please enter a valid email address.' });
+      return;
+    }
+    if (password.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      return;
+    }
+
+    const exists = usersStore.users.some(
+      (record) => record.user.email.toLowerCase() === email
+    );
+    if (exists) {
+      res.status(409).json({
+        error: 'An account with this email already exists. Please sign in instead.',
+      });
+      return;
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashPassword(password, salt);
+    const newUser: UserAccount = {
+      id: `user-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      fullName,
+      email,
+      phone,
+      role: 'citizen',
+      avatarUrl: DEFAULT_AVATAR,
+      joinedAt: new Date().toISOString(),
+    };
+
+    usersStore = {
+      users: [{ user: newUser, salt, passwordHash }, ...usersStore.users],
+    };
+    saveUsersStore(usersStore);
+
+    res.status(201).json({
+      user: newUser,
+      totalUsersCount: 1280 + usersStore.users.length,
+    });
+  });
+
+  app.post('/api/auth/signin', (req, res) => {
+    const body = (req.body ?? {}) as { email?: string; password?: string };
+    const email = body.email?.trim().toLowerCase() ?? '';
+    const password = body.password ?? '';
+
+    if (!email || !password) {
+      res.status(400).json({
+        error: 'Please enter both your email address and password.',
+      });
+      return;
+    }
+
+    const found = usersStore.users.find(
+      (record) => record.user.email.toLowerCase() === email
+    );
+    if (!found || !verifyPassword(password, found.salt, found.passwordHash)) {
+      res.status(401).json({
+        error: 'Invalid email or password. Please check your credentials and try again.',
+      });
+      return;
+    }
+
+    res.json({
+      user: found.user,
+      totalUsersCount: 1280 + usersStore.users.length,
+    });
+  });
+
+  app.post('/api/auth/reset-password', (req, res) => {
+    const body = (req.body ?? {}) as { email?: string };
+    const email = body.email?.trim().toLowerCase() ?? '';
+    if (!email || !email.includes('@')) {
+      res.status(400).json({ error: 'Please enter a valid email address.' });
+      return;
+    }
+    res.json({
+      ok: true,
+      message: `If an account exists for ${email}, password reset instructions have been processed.`,
+    });
+  });
+
+  app.patch('/api/auth/profile', (req, res) => {
+    const body = (req.body ?? {}) as {
+      id?: string;
+      fullName?: string;
+      phone?: string;
+      avatarUrl?: string;
+      role?: 'citizen' | 'admin';
+    };
+    if (!body.id) {
+      res.status(400).json({ error: 'Missing user id.' });
+      return;
+    }
+
+    let updatedUser: UserAccount | null = null;
+    const nextUsers = usersStore.users.map((record) => {
+      if (record.user.id !== body.id) return record;
+      updatedUser = {
+        ...record.user,
+        fullName: body.fullName !== undefined ? body.fullName : record.user.fullName,
+        phone: body.phone !== undefined ? body.phone : record.user.phone,
+        avatarUrl: body.avatarUrl !== undefined ? body.avatarUrl : record.user.avatarUrl,
+        role: body.role !== undefined ? body.role : record.user.role,
+      };
+      return { ...record, user: updatedUser };
+    });
+
+    if (updatedUser) {
+      usersStore = { users: nextUsers };
+      saveUsersStore(usersStore);
+    }
+
+    res.json({ user: updatedUser });
   });
 
   app.get('/api/safety-data', (_req, res) => {
@@ -172,37 +397,33 @@ async function startServer() {
     const actor = userId || 'guest-citizen';
 
     let changed = false;
-    let resolvedTitle: string | null = null;
+    let flaggedTitle: string | null = null;
     const nextHazards = store.hazards.map((h) => {
       if (h.id !== id) return h;
       if (h.notPresentByUserIds.includes(actor)) return h;
       changed = true;
       const notPresentReports = h.notPresentReports + 1;
       const trustScore = Math.max(15, h.trustScore - 8);
-      const status: ReportStatus =
-        notPresentReports >= 3 && notPresentReports > h.confirmations / 2
-          ? 'Resolved'
-          : h.status;
-      if (status === 'Resolved' && h.status !== 'Resolved') {
-        resolvedTitle = h.title;
+      // Only Admin can mark a hazard Resolved and remove it from the map
+      if (notPresentReports === 3 && h.status !== 'Resolved') {
+        flaggedTitle = h.title;
       }
       return {
         ...h,
         notPresentReports,
         trustScore,
-        status,
         notPresentByUserIds: [...h.notPresentByUserIds, actor],
       };
     });
 
     let nextNotifications = store.notifications;
-    if (resolvedTitle) {
+    if (flaggedTitle) {
       nextNotifications = [
         {
-          id: `notif-${Date.now()}`,
-          type: 'Resolved Report',
-          title: 'Hazard Cleared & Removed from Map',
-          message: `"${resolvedTitle}" was confirmed cleared by the community and removed from the map.`,
+          id: `notif-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          type: 'Nearby Hazard Alert',
+          title: 'Hazard Flagged Cleared — Awaiting Admin',
+          message: `Community members flagged "${flaggedTitle}" as cleared. Remains on map until Admin marks it Resolved.`,
           hazardId: id,
           createdAt: new Date().toISOString(),
           read: false,
@@ -274,6 +495,15 @@ async function startServer() {
   });
 
   app.delete('/api/hazards/:id', (req, res) => {
+    const isAdminHeader = req.headers['x-suraksha-admin'] === 'true';
+    const isAdminBody = Boolean((req.body as { isAdmin?: boolean } | undefined)?.isAdmin);
+    if (!isAdminHeader && !isAdminBody) {
+      res.status(403).json({
+        error: 'Only Admin can remove reported hazards from the map.',
+      });
+      return;
+    }
+
     const { id } = req.params;
     const nextHazards = store.hazards.filter((h) => h.id !== id);
     const nextNotifications = store.notifications.filter(
@@ -309,8 +539,10 @@ async function startServer() {
   });
 
   app.post('/api/reset-demo', (_req, res) => {
+    const demoIds = new Set(INITIAL_HAZARDS.map((h) => h.id));
+    const userSubmitted = store.hazards.filter((h) => !demoIds.has(h.id));
     store = {
-      hazards: [...INITIAL_HAZARDS],
+      hazards: [...userSubmitted, ...INITIAL_HAZARDS],
       notifications: [...INITIAL_NOTIFICATIONS],
     };
     saveStore(store);
