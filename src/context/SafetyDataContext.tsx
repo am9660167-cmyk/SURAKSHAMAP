@@ -64,6 +64,7 @@ interface SafetyDataContextValue {
   journeyRequest: JourneyRequest;
   detectUserLocation: () => Promise<Coordinates | null>;
   useApproximateLocation: () => Promise<Coordinates | null>;
+  setLiveUserLocation: (coords: Coordinates, source?: 'gps' | 'network') => void;
   addHazardReport: (input: AddHazardInput) => HazardReport;
   confirmHazard: (hazardId: string, userId: string) => void;
   reportNotPresent: (hazardId: string, userId: string) => void;
@@ -74,7 +75,6 @@ interface SafetyDataContextValue {
   updateSettings: (partial: Partial<UserSettings>) => void;
   toggleTheme: () => void;
   setJourneyRequest: (req: JourneyRequest) => void;
-  updateUserLocation: (coords: Coordinates) => void;
   resetDemoData: () => void;
 }
 
@@ -404,6 +404,17 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
+  const setLiveUserLocation = (
+    coords: Coordinates,
+    source: 'gps' | 'network' = 'gps'
+  ) => {
+    setUserLocation(coords);
+    setHasDetectedGps(true);
+    setGpsStatus('granted');
+    setGpsSource(source);
+    setGpsError(null);
+  };
+
   // Automatically read GPS on load if browser permission was already granted
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.permissions?.query) return;
@@ -708,6 +719,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         journeyRequest,
         detectUserLocation,
         useApproximateLocation,
+        setLiveUserLocation,
         addHazardReport,
         confirmHazard,
         reportNotPresent,
@@ -718,7 +730,6 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         updateSettings,
         toggleTheme,
         setJourneyRequest,
-        updateUserLocation: setUserLocation,
         resetDemoData,
       }}
     >
