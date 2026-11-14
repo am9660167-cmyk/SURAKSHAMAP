@@ -1,0 +1,8 @@
+{
+  "name": "SurakshaMap",
+  "description": "Crowd-sourced community safety and geolocation hazard map platform. Know the risks, plan your route, and stay aware.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": []
+}
