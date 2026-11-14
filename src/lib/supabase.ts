@@ -9,6 +9,9 @@ declare global {
   }
 }
 
+const DEFAULT_PUBLIC_SUPABASE_URL = 'https://jgenkcworgpwlvdpojny.supabase.co';
+const DEFAULT_PUBLIC_SUPABASE_KEY = 'sb_publishable_i_khFSmkJMR3dqxWKBorUA_jq7V7DN9';
+
 const runtimeEnv = typeof window !== 'undefined' ? window.__SUPABASE_ENV__ : undefined;
 const rawUrl = (
   (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
@@ -36,9 +39,10 @@ function normalizeSupabaseUrl(value?: string): string | undefined {
   }
 }
 
-const supabaseUrl = normalizeSupabaseUrl(rawUrl);
+const supabaseUrl = normalizeSupabaseUrl(rawUrl) ?? DEFAULT_PUBLIC_SUPABASE_URL;
 const supabaseKey =
-  rawKey && !rawKey.includes('YOUR_SUPABASE') ? rawKey : undefined;
+  (rawKey && !rawKey.includes('YOUR_SUPABASE') ? rawKey : undefined) ??
+  DEFAULT_PUBLIC_SUPABASE_KEY;
 
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseKey);
 
