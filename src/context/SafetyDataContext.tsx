@@ -233,7 +233,76 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, [journeyRequest]);
 
-  // Sync hazards and notifications from Supabase on startup
+  // Sync shared hazards and notifications from server API + real-time SSE stream
+  useEffect(() => {
+    let active = true;
+
+    const applyServerState = (payload: {
+      hazards?: HazardReport[];
+      notifications?: NotificationItem[];
+    }) => {
+      if (!active) return;
+      if (Array.isArray(payload.hazards)) {
+        setHazards(payload.hazards);
+      }
+      if (Array.isArray(payload.notifications)) {
+        setNotifications(payload.notifications);
+      }
+    };
+
+    const fetchSharedSafetyData = async () => {
+      try {
+        const res = await fetch('/api/safety-data', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          hazards?: HazardReport[];
+          notifications?: NotificationItem[];
+        };
+        applyServerState(data);
+      } catch {
+        // Offline/fallback keeps localStorage state
+      }
+    };
+
+    void fetchSharedSafetyData();
+
+    let eventSource: EventSource | null = null;
+    if (typeof EventSource !== 'undefined') {
+      try {
+        eventSource = new EventSource('/api/events');
+        eventSource.addEventListener('sync', (ev) => {
+          try {
+            const parsed = JSON.parse((ev as MessageEvent).data) as {
+              hazards?: HazardReport[];
+              notifications?: NotificationItem[];
+            };
+            applyServerState(parsed);
+          } catch {
+            // Ignore malformed SSE event
+          }
+        });
+      } catch {
+        // Ignore EventSource init error
+      }
+    }
+
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchSharedSafetyData();
+      }
+    };
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      active = false;
+      eventSource?.close();
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+    };
+  }, []);
+
+  // Sync hazards and notifications from Supabase on startup when configured
   useEffect(() => {
     const client = supabase;
     if (!client) return;
@@ -476,6 +545,12 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
     };
     setNotifications((prev) => [newNotif, ...prev]);
 
+    void fetch('/api/hazards', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hazard: newHazard, notification: newNotif }),
+    }).catch(() => undefined);
+
     if (supabase) {
       void supabase.from('hazard_reports').insert(mapHazardToDbRow(newHazard));
       void supabase.from('notifications').insert({
@@ -524,6 +599,12 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         return updated;
       })
     );
+
+    void fetch(`/api/hazards/${encodeURIComponent(hazardId)}/confirm`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId }),
+    }).catch(() => undefined);
   };
 
   const reportNotPresent = (hazardId: string, userId: string) => {
@@ -558,14 +639,21 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         return updated;
       })
     );
+
+    void fetch(`/api/hazards/${encodeURIComponent(hazardId)}/not-present`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId }),
+    }).catch(() => undefined);
   };
 
   const updateHazardStatus = (hazardId: string, status: ReportStatus) => {
-    let targetTitle = '';
+    const existing = hazards.find((h) => h.id === hazardId);
+    const targetTitle = existing?.title ?? '';
+
     setHazards((prev) =>
       prev.map((h) => {
         if (h.id !== hazardId) return h;
-        targetTitle = h.title;
         const nextTrust =
           status === 'Verified'
             ? Math.max(h.trustScore, 90)
@@ -586,15 +674,24 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       })
     );
 
+    void fetch(`/api/hazards/${encodeURIComponent(hazardId)}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    }).catch(() => undefined);
+
     if (status === 'Verified' || status === 'Resolved') {
       const notif: NotificationItem = {
         id: `notif-${Date.now()}`,
         type: status === 'Verified' ? 'Verified Report' : 'Resolved Report',
-        title: status === 'Verified' ? 'Report Approved by Admin' : 'Report marked Resolved',
+        title:
+          status === 'Verified'
+            ? 'Report Approved by Admin'
+            : 'Hazard Resolved & Removed from Map',
         message:
           status === 'Verified'
             ? `"${targetTitle || 'Community hazard report'}" has been approved and verified by Admin.`
-            : `"${targetTitle || 'Community hazard report'}" status updated to ${status}.`,
+            : `"${targetTitle || 'Community hazard report'}" has been marked Resolved by Admin and deleted from the live map.`,
         hazardId,
         createdAt: new Date().toISOString(),
         read: false,
@@ -629,6 +726,10 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       // Ignore quota
     }
 
+    await fetch(`/api/hazards/${encodeURIComponent(hazardId)}`, {
+      method: 'DELETE',
+    }).catch(() => undefined);
+
     if (supabase) {
       try {
         const { data: deletedRows, error } = await supabase
@@ -656,6 +757,9 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
     setNotifications((prev) =>
       prev.map((n) => (n.id === id ? { ...n, read: true } : n))
     );
+    void fetch(`/api/notifications/${encodeURIComponent(id)}/read`, {
+      method: 'PATCH',
+    }).catch(() => undefined);
     if (supabase) {
       void supabase.from('notifications').update({ read: true }).eq('id', id);
     }
@@ -663,6 +767,9 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const markAllNotificationsRead = () => {
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    void fetch('/api/notifications/read-all', { method: 'PATCH' }).catch(
+      () => undefined
+    );
     if (supabase) {
       void supabase.from('notifications').update({ read: true }).eq('read', false);
     }
@@ -694,6 +801,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
   const resetDemoData = () => {
     setHazards(INITIAL_HAZARDS);
     setNotifications(INITIAL_NOTIFICATIONS);
+    void fetch('/api/reset-demo', { method: 'POST' }).catch(() => undefined);
     if (supabase) {
       void supabase
         .from('hazard_reports')

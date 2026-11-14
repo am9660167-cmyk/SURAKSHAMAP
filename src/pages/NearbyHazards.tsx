@@ -22,7 +22,7 @@ export const NearbyHazards: React.FC = () => {
 
   const nearbyList = useMemo(() => {
     return hazards
-      .filter((h) => h.status !== 'Rejected')
+      .filter((h) => h.status !== 'Rejected' && h.status !== 'Resolved')
       .map((h) => ({
         hazard: h,
         distanceKm: haversineDistanceKm(userLocation, h.location),

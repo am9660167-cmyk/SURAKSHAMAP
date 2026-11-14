@@ -558,7 +558,9 @@ export const ReportHazard: React.FC = () => {
 
               <div className="mt-4">
                 <MapView
-                  hazards={hazards.filter((h) => h.status !== 'Rejected')}
+                  hazards={hazards.filter(
+                    (h) => h.status !== 'Rejected' && h.status !== 'Resolved'
+                  )}
                   center={pickedCoords}
                   userLocation={userLocation}
                   pickerPosition={pickedCoords}

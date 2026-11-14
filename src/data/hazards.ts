@@ -1,4 +1,4 @@
-import { HazardReport } from '../types/safety';
+import type { HazardReport } from '../types/safety.ts';
 
 const now = Date.now();
 const hoursAgo = (h: number) => new Date(now - h * 3600 * 1000).toISOString();

@@ -52,7 +52,7 @@ export const HazardMap: React.FC = () => {
 
   const filteredHazards = useMemo(() => {
     return hazards.filter((h) => {
-      if (h.status === 'Rejected') return false;
+      if (h.status === 'Rejected' || h.status === 'Resolved') return false;
       if (selectedCategory !== 'All' && h.category !== selectedCategory) return false;
       if (selectedSeverity !== 'All' && h.severity !== selectedSeverity) return false;
       return true;
@@ -170,7 +170,13 @@ export const HazardMap: React.FC = () => {
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700'
               }`}
             >
-              All Categories ({hazards.filter((h) => h.status !== 'Rejected').length})
+              All Categories (
+              {
+                hazards.filter(
+                  (h) => h.status !== 'Rejected' && h.status !== 'Resolved'
+                ).length
+              }
+              )
             </button>
 
             {HAZARD_CATEGORIES.map((cat) => {

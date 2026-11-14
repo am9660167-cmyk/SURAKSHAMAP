@@ -1,4 +1,4 @@
-import { NotificationItem } from '../types/safety';
+import type { NotificationItem } from '../types/safety.ts';
 
 const now = Date.now();
 const minsAgo = (m: number) => new Date(now - m * 60000).toISOString();

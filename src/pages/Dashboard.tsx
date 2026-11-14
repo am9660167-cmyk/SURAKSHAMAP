@@ -211,7 +211,9 @@ export const Dashboard: React.FC = () => {
             )}
 
             <MapView
-              hazards={hazards.filter((h) => h.status !== 'Rejected')}
+              hazards={hazards.filter(
+                (h) => h.status !== 'Rejected' && h.status !== 'Resolved'
+              )}
               center={userLocation}
               userLocation={userLocation}
               selectedHazard={selectedHazard}

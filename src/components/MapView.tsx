@@ -65,6 +65,7 @@ interface MapViewProps {
   followCursor?: boolean;
   alignToHeading?: boolean;
   onAlignToHeadingChange?: (align: boolean) => void;
+  allowResolvedPin?: boolean;
   showConfigNotice?: boolean;
   interactiveHint?: string;
 }
@@ -307,6 +308,7 @@ export const MapView: React.FC<MapViewProps> = ({
   followCursor = false,
   alignToHeading,
   onAlignToHeadingChange,
+  allowResolvedPin = false,
   interactiveHint,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -432,13 +434,27 @@ export const MapView: React.FC<MapViewProps> = ({
     setViewCenter(center);
   }, [center.lat, center.lng]);
 
+  const visibleHazards = hazards.filter(
+    (h) => h.status !== 'Rejected' && (allowResolvedPin || h.status !== 'Resolved')
+  );
+
+  // Close popup automatically if the selected hazard was resolved or deleted
+  useEffect(() => {
+    if (!activeHazard) return;
+    const stillVisible = visibleHazards.some((h) => h.id === activeHazard.id);
+    if (!stillVisible) {
+      setInternalSelected(null);
+      onSelectHazardRef.current?.(null);
+    }
+  }, [visibleHazards, activeHazard?.id]);
+
   // Render Hazard Markers
   useEffect(() => {
     const group = hazardLayerRef.current;
     if (!group) return;
     group.clearLayers();
 
-    hazards.forEach((hazard) => {
+    visibleHazards.forEach((hazard) => {
       const isSelected = activeHazard?.id === hazard.id;
       const marker = L.marker([hazard.location.lat, hazard.location.lng], {
         icon: createHazardDivIcon(hazard, isSelected),
@@ -453,7 +469,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
       marker.addTo(group);
     });
-  }, [hazards, activeHazard?.id]);
+  }, [hazards, allowResolvedPin, activeHazard?.id]);
 
   // Render User GPS, Picker, Origin & Destination markers
   useEffect(() => {

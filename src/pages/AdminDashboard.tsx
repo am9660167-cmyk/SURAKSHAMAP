@@ -288,6 +288,20 @@ export const AdminDashboard: React.FC = () => {
                         type="button"
                         onClick={() => {
                           ensureAdminSession();
+                          updateHazardStatus(report.id, 'Resolved');
+                          setActionFeedback(
+                            `Marked "${report.title}" as Resolved — removed from the live map for all users.`
+                          );
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                      >
+                        <Wrench size={12} />
+                        Resolve
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          ensureAdminSession();
                           updateHazardStatus(report.id, 'Rejected');
                           setActionFeedback(`Rejected "${report.title}".`);
                         }}
@@ -568,19 +582,28 @@ export const AdminDashboard: React.FC = () => {
                             </span>
                           )}
 
-                          <button
-                            type="button"
-                            onClick={() => {
-                              ensureAdminSession();
-                              updateHazardStatus(report.id, 'Resolved');
-                              setActionFeedback(`Marked "${report.title}" as Resolved.`);
-                            }}
-                            title="Mark report resolved"
-                            className="inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700"
-                          >
-                            <Wrench size={11} />
-                            Resolve
-                          </button>
+                          {report.status !== 'Resolved' ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                ensureAdminSession();
+                                updateHazardStatus(report.id, 'Resolved');
+                                setActionFeedback(
+                                  `Marked "${report.title}" as Resolved — removed from the live map for all users.`
+                                );
+                              }}
+                              title="Mark report resolved and delete from map"
+                              className="inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700"
+                            >
+                              <Wrench size={11} />
+                              Resolve
+                            </button>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-semibold text-blue-700 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-300">
+                              <Wrench size={11} />
+                              Off Map
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={() => {
@@ -689,6 +712,7 @@ export const AdminDashboard: React.FC = () => {
                 zoom={15}
                 userLocation={userLocation}
                 selectedHazard={mapModalHazard}
+                allowResolvedPin
                 heightClass="h-[340px]"
                 showConfigNotice={false}
               />
