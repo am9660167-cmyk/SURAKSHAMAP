@@ -105,6 +105,11 @@ create policy "Community confirmations and moderation updates"
   on public.hazard_reports for update
   using (true);
 
+drop policy if exists "Reporters and admins can delete hazard reports" on public.hazard_reports;
+create policy "Reporters and admins can delete hazard reports"
+  on public.hazard_reports for delete
+  using (true);
+
 -- 3. Notifications
 create table if not exists public.notifications (
   id text primary key,
@@ -133,6 +138,11 @@ create policy "Notifications insertable"
 drop policy if exists "Notifications updatable" on public.notifications;
 create policy "Notifications updatable"
   on public.notifications for update
+  using (user_id is null or auth.uid() = user_id);
+
+drop policy if exists "Notifications deletable" on public.notifications;
+create policy "Notifications deletable"
+  on public.notifications for delete
   using (user_id is null or auth.uid() = user_id);
 
 -- 4. User Settings

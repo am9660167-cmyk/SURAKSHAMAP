@@ -1,5 +1,12 @@
 import React, { useState } from 'react';
-import { CheckCircle2, MapPin, ShieldCheck, ThumbsDown, ThumbsUp } from 'lucide-react';
+import {
+  CheckCircle2,
+  MapPin,
+  ShieldCheck,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
+} from 'lucide-react';
 import { HazardReport } from '../types/safety';
 import { useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
@@ -26,10 +33,22 @@ export const HazardCard: React.FC<HazardCardProps> = ({
   compact = false,
 }) => {
   const { user } = useAuth();
-  const { userLocation, confirmHazard, reportNotPresent } = useSafetyData();
+  const {
+    userLocation,
+    confirmHazard,
+    reportNotPresent,
+    updateHazardStatus,
+    deleteHazardReport,
+  } = useSafetyData();
   const [imgError, setImgError] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const actorId = user?.id ?? 'guest-citizen';
+  const isAdmin = user?.role === 'admin';
+  const canDelete =
+    isAdmin ||
+    hazard.reporterId === actorId ||
+    hazard.reporterId === 'guest-citizen';
   const hasConfirmed = hazard.confirmedByUserIds.includes(actorId);
   const hasReportedAbsent = hazard.notPresentByUserIds.includes(actorId);
 
@@ -137,6 +156,17 @@ export const HazardCard: React.FC<HazardCardProps> = ({
             Cleared
           </button>
 
+          {isAdmin && hazard.status === 'Pending' && (
+            <button
+              type="button"
+              onClick={() => updateHazardStatus(hazard.id, 'Verified')}
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 whitespace-nowrap shrink-0"
+            >
+              <CheckCircle2 size={12} />
+              Approve
+            </button>
+          )}
+
           {onSelectOnMap && (
             <button
               type="button"
@@ -146,6 +176,39 @@ export const HazardCard: React.FC<HazardCardProps> = ({
               Locate
             </button>
           )}
+
+          {canDelete &&
+            (confirmingDelete ? (
+              <div className="inline-flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void deleteHazardReport(hazard.id);
+                    setConfirmingDelete(false);
+                  }}
+                  className="rounded-lg bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700 whitespace-nowrap shrink-0"
+                >
+                  Confirm
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingDelete(false)}
+                  className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                title="Delete this hazard report"
+                className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/70 whitespace-nowrap shrink-0"
+              >
+                <Trash2 size={12} />
+                Delete
+              </button>
+            ))}
         </div>
       </div>
     </article>

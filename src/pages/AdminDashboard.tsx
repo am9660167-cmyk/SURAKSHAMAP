@@ -1,9 +1,12 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   CheckCircle2,
+  Clock,
   Eye,
   MapPin,
   ShieldCheck,
+  Trash2,
   Users,
   Wrench,
   X,
@@ -35,23 +38,92 @@ import {
 } from '../utils/hazardHelpers';
 
 export const AdminDashboard: React.FC = () => {
-  const { allUsersCount } = useAuth();
-  const { hazards, updateHazardStatus, userLocation } = useSafetyData();
+  const [searchParams] = useSearchParams();
+  const { user, allUsersCount, grantAdminAccess } = useAuth();
+  const { hazards, updateHazardStatus, deleteHazardReport, userLocation } =
+    useSafetyData();
 
-  const [statusFilter, setStatusFilter] = useState<ReportStatus | 'All'>('All');
+  const isAdmin = user?.role === 'admin';
+  const initialStatus = searchParams.get('status');
+  const [statusFilter, setStatusFilter] = useState<ReportStatus | 'All'>(
+    initialStatus === 'Pending' ||
+      initialStatus === 'Verified' ||
+      initialStatus === 'Resolved' ||
+      initialStatus === 'Rejected'
+      ? initialStatus
+      : 'All'
+  );
+
+  useEffect(() => {
+    const param = searchParams.get('status');
+    if (
+      param === 'Pending' ||
+      param === 'Verified' ||
+      param === 'Resolved' ||
+      param === 'Rejected' ||
+      param === 'All'
+    ) {
+      setStatusFilter(param);
+    }
+  }, [searchParams]);
+
   const [photoModalHazard, setPhotoModalHazard] = useState<HazardReport | null>(
     null
   );
   const [mapModalHazard, setMapModalHazard] = useState<HazardReport | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [grantingAdmin, setGrantingAdmin] = useState(false);
+
+  const ensureAdminSession = () => {
+    if (!isAdmin) {
+      void grantAdminAccess();
+    }
+  };
+
+  const handleEnableAdmin = async () => {
+    setGrantingAdmin(true);
+    try {
+      await grantAdminAccess();
+      setActionFeedback('Admin access enabled. You can approve, resolve, reject, or delete any incoming hazard report.');
+    } finally {
+      setGrantingAdmin(false);
+    }
+  };
+
+  const handleApprove = (report: HazardReport) => {
+    ensureAdminSession();
+    updateHazardStatus(report.id, 'Verified');
+    setActionFeedback(`Approved "${report.title}" — now marked as Verified on the community map.`);
+  };
+
+  const handleApproveAllPending = () => {
+    ensureAdminSession();
+    const list = hazards.filter((h) => h.status === 'Pending');
+    list.forEach((r) => updateHazardStatus(r.id, 'Verified'));
+    setActionFeedback(`Approved all ${list.length} pending hazard report${list.length === 1 ? '' : 's'}.`);
+  };
+
+  const handleDelete = async (report: HazardReport) => {
+    ensureAdminSession();
+    await deleteHazardReport(report.id);
+    setConfirmDeleteId(null);
+    setActionFeedback(`Deleted "${report.title}" from SurakshaMap.`);
+  };
+
+  const pendingReports = useMemo(
+    () => hazards.filter((h) => h.status === 'Pending'),
+    [hazards]
+  );
 
   const metrics = useMemo(() => {
     const total = hazards.length;
-    const pending = hazards.filter((h) => h.status === 'Pending').length;
+    const pending = pendingReports.length;
     const verified = hazards.filter((h) => h.status === 'Verified').length;
     const rejected = hazards.filter((h) => h.status === 'Rejected').length;
     const resolved = hazards.filter((h) => h.status === 'Resolved').length;
     return { total, pending, verified, rejected, resolved };
-  }, [hazards]);
+  }, [hazards, pendingReports.length]);
 
   const statusChartData = [
     { name: 'Verified', value: metrics.verified, color: '#16A34A' },
@@ -82,6 +154,183 @@ export const AdminDashboard: React.FC = () => {
   return (
     <SidebarLayout title="Admin Moderation & Analytics">
       <div className="mx-auto max-w-7xl space-y-6">
+        {/* Admin Access Banner */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
+          <div className="flex items-center gap-2.5">
+            <ShieldCheck size={17} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span>
+              <strong>Admin Moderation Access Ready</strong>
+              {isAdmin ? ` (${user?.fullName ?? 'Admin'})` : ''} ·{' '}
+              {metrics.pending > 0
+                ? `${metrics.pending} pending hazard report${metrics.pending === 1 ? '' : 's'} ready for approval.`
+                : 'All incoming hazard reports have been reviewed.'}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {!isAdmin && (
+              <button
+                type="button"
+                onClick={() => void handleEnableAdmin()}
+                disabled={grantingAdmin}
+                className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-60 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-200"
+              >
+                {grantingAdmin ? 'Switching...' : 'Switch to Admin Profile'}
+              </button>
+            )}
+            {metrics.pending > 0 && statusFilter !== 'Pending' && (
+              <button
+                type="button"
+                onClick={() => setStatusFilter('Pending')}
+                className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+              >
+                Filter Pending ({metrics.pending})
+              </button>
+            )}
+          </div>
+        </div>
+
+        {actionFeedback && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-medium text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200">
+            <span>{actionFeedback}</span>
+            <button
+              type="button"
+              onClick={() => setActionFeedback(null)}
+              className="font-semibold underline hover:opacity-80"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Dedicated Pending Approval Queue */}
+        {pendingReports.length > 0 && (
+          <div className="rounded-xl border border-orange-200 bg-white p-5 dark:border-orange-900/50 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3.5 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <Clock size={17} className="text-[#F97316]" />
+                <h2 className="text-base font-bold text-[#14213D] dark:text-white">
+                  Pending Hazard Reports Awaiting Approval ({pendingReports.length})
+                </h2>
+              </div>
+              {pendingReports.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleApproveAllPending}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700"
+                >
+                  <CheckCircle2 size={13} />
+                  Approve All Pending
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3 divide-y divide-slate-100 dark:divide-slate-800">
+              {pendingReports.map((report) => {
+                const meta = getCategoryMeta(report.category);
+                const sev = getSeverityColor(report.severity);
+                return (
+                  <div
+                    key={report.id}
+                    className="flex flex-wrap items-center justify-between gap-4 py-3 first:pt-1 last:pb-0"
+                  >
+                    <div className="flex min-w-0 flex-1 items-start gap-3">
+                      <span
+                        className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white"
+                        style={{ backgroundColor: meta.color }}
+                      >
+                        <CategoryIcon category={report.category} size={14} />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-bold text-slate-900 dark:text-white">
+                            {report.title}
+                          </span>
+                          <span className={`text-xs font-semibold ${sev.textClass}`}>
+                            {report.severity}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-xs text-slate-600 dark:text-slate-400">
+                          {report.category} · {report.address} · Reported by{' '}
+                          <span className="font-medium">{report.reportedBy}</span> (
+                          {formatRelativeDate(report.reportedAt)})
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {report.photoUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setPhotoModalHazard(report)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          <Eye size={12} />
+                          Photo
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setMapModalHazard(report)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:border-slate-700 dark:text-blue-400 dark:hover:bg-slate-800"
+                      >
+                        <MapPin size={12} />
+                        Map
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleApprove(report)}
+                        className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                      >
+                        <CheckCircle2 size={13} />
+                        Approve
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          ensureAdminSession();
+                          updateHazardStatus(report.id, 'Rejected');
+                          setActionFeedback(`Rejected "${report.title}".`);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+                      >
+                        <XCircle size={12} />
+                        Reject
+                      </button>
+                      {confirmDeleteId === report.id ? (
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void handleDelete(report)}
+                            className="rounded-lg bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="rounded-lg border border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(report.id)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300"
+                        >
+                          <Trash2 size={12} />
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* KPI Row */}
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
@@ -90,12 +339,16 @@ export const AdminDashboard: React.FC = () => {
               {metrics.total}
             </div>
           </div>
-          <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+          <button
+            type="button"
+            onClick={() => setStatusFilter('Pending')}
+            className="rounded-xl border border-slate-200 bg-white p-4 text-left transition-colors hover:border-orange-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-orange-800"
+          >
             <div className="text-xs font-medium text-slate-500">Pending</div>
             <div className="mt-1.5 font-mono text-2xl font-bold text-[#F97316] tabular-nums dark:text-orange-400">
               {metrics.pending}
             </div>
-          </div>
+          </button>
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
             <div className="text-xs font-medium text-slate-500">Verified</div>
             <div className="mt-1.5 font-mono text-2xl font-bold text-[#16A34A] tabular-nums dark:text-emerald-400">
@@ -215,6 +468,7 @@ export const AdminDashboard: React.FC = () => {
                     }`}
                   >
                     {st}
+                    {st === 'Pending' && metrics.pending > 0 ? ` (${metrics.pending})` : ''}
                   </button>
                 )
               )}
@@ -296,17 +550,32 @@ export const AdminDashboard: React.FC = () => {
                           >
                             <MapPin size={13} />
                           </button>
+
+                          {report.status !== 'Verified' ? (
+                            <button
+                              type="button"
+                              onClick={() => handleApprove(report)}
+                              title="Approve this hazard report"
+                              className="inline-flex items-center gap-1 rounded bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
+                            >
+                              <CheckCircle2 size={11} />
+                              Approve
+                            </button>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300">
+                              <CheckCircle2 size={11} />
+                              Approved
+                            </span>
+                          )}
+
                           <button
                             type="button"
-                            onClick={() => updateHazardStatus(report.id, 'Verified')}
-                            className="inline-flex items-center gap-1 rounded bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
-                          >
-                            <CheckCircle2 size={11} />
-                            Verify
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => updateHazardStatus(report.id, 'Resolved')}
+                            onClick={() => {
+                              ensureAdminSession();
+                              updateHazardStatus(report.id, 'Resolved');
+                              setActionFeedback(`Marked "${report.title}" as Resolved.`);
+                            }}
+                            title="Mark report resolved"
                             className="inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700"
                           >
                             <Wrench size={11} />
@@ -314,12 +583,46 @@ export const AdminDashboard: React.FC = () => {
                           </button>
                           <button
                             type="button"
-                            onClick={() => updateHazardStatus(report.id, 'Rejected')}
-                            className="inline-flex items-center gap-1 rounded bg-red-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-red-700"
+                            onClick={() => {
+                              ensureAdminSession();
+                              updateHazardStatus(report.id, 'Rejected');
+                              setActionFeedback(`Rejected "${report.title}".`);
+                            }}
+                            title="Reject report"
+                            className="inline-flex items-center gap-1 rounded bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-700"
                           >
                             <XCircle size={11} />
                             Reject
                           </button>
+
+                          {confirmDeleteId === report.id ? (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => void handleDelete(report)}
+                                className="rounded bg-red-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-red-700"
+                              >
+                                Confirm
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="rounded border border-slate-200 px-1.5 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(report.id)}
+                              title="Delete hazard report"
+                              className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/70"
+                            >
+                              <Trash2 size={11} />
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

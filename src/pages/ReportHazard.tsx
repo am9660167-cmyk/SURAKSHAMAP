@@ -8,6 +8,7 @@ import {
   Loader2,
   MapPin,
   ScanSearch,
+  Trash2,
   Upload,
 } from 'lucide-react';
 import { CategoryIcon } from '../components/CategoryIcon';
@@ -23,6 +24,9 @@ import {
   HazardSeverity,
 } from '../types/safety';
 import {
+  formatRelativeDate,
+  getCategoryMeta,
+  getStatusColor,
   HAZARD_CATEGORIES,
   SEVERITY_OPTIONS,
   simulateAiVerification,
@@ -59,6 +63,7 @@ export const ReportHazard: React.FC = () => {
     gpsNotice,
     gpsError,
     addHazardReport,
+    deleteHazardReport,
   } = useSafetyData();
 
   const [category, setCategory] = useState<HazardCategory>('Damaged Roads');
@@ -72,6 +77,17 @@ export const ReportHazard: React.FC = () => {
   const [addressQuery, setAddressQuery] = useState('');
   const [error, setError] = useState('');
   const [submittedReport, setSubmittedReport] = useState<HazardReport | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
+
+  const actorId = user?.id ?? 'guest-citizen';
+  const mySubmittedReports = useMemo(
+    () =>
+      hazards.filter(
+        (h) => h.reporterId === actorId || h.reporterId === 'guest-citizen'
+      ),
+    [hazards, actorId]
+  );
 
   const aiPreview = useMemo(() => {
     return simulateAiVerification({
@@ -139,15 +155,39 @@ export const ReportHazard: React.FC = () => {
     });
 
     setSubmittedReport(created);
+    setDeleteNotice(null);
+    setConfirmDeleteId(null);
     setTitle('');
     setDescription('');
     setPhotoUrl(undefined);
     setPhotoName('');
   };
 
+  const handleDeleteReport = async (report: HazardReport) => {
+    await deleteHazardReport(report.id);
+    if (submittedReport?.id === report.id) {
+      setSubmittedReport(null);
+    }
+    setConfirmDeleteId(null);
+    setDeleteNotice(`Deleted hazard report "${report.title}".`);
+  };
+
   return (
     <SidebarLayout title="Report a Hazard">
       <div className="mx-auto max-w-6xl space-y-6">
+        {deleteNotice && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-medium text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
+            <span>{deleteNotice}</span>
+            <button
+              type="button"
+              onClick={() => setDeleteNotice(null)}
+              className="font-semibold text-[#2563EB] hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {submittedReport && (
           <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-950/50">
             <div className="flex items-start gap-3">
@@ -160,12 +200,12 @@ export const ReportHazard: React.FC = () => {
                   Hazard Report Submitted to Community Map
                 </h2>
                 <p className="mt-0.5 text-xs text-emerald-800 dark:text-emerald-300">
-                  "{submittedReport.title}" is now visible on the map as{' '}
+                  "{submittedReport.title}" is now awaiting admin review as{' '}
                   <strong>{submittedReport.status}</strong>.
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Link
                 to="/explore"
                 className="rounded-lg bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-800"
@@ -178,6 +218,33 @@ export const ReportHazard: React.FC = () => {
               >
                 My Reports
               </Link>
+              {confirmDeleteId === submittedReport.id ? (
+                <div className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteReport(submittedReport)}
+                    className="rounded-lg bg-red-600 px-3 py-2 text-xs font-semibold text-white hover:bg-red-700"
+                  >
+                    Confirm Delete
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteId(null)}
+                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteId(submittedReport.id)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-white px-3.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900 dark:bg-slate-900 dark:text-red-300"
+                >
+                  <Trash2 size={13} />
+                  Delete Report
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -526,6 +593,89 @@ export const ReportHazard: React.FC = () => {
             </div>
           </div>
         </form>
+
+        {mySubmittedReports.length > 0 && (
+          <div className="rounded-xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-[#14213D] dark:text-white">
+                  Your Submitted Hazard Reports
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Manage or delete reports you have submitted.
+                </p>
+              </div>
+              <Link
+                to="/my-reports"
+                className="text-xs font-semibold text-[#2563EB] hover:underline dark:text-blue-400"
+              >
+                View all in My Reports →
+              </Link>
+            </div>
+
+            <div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">
+              {mySubmittedReports.slice(0, 5).map((report) => {
+                const meta = getCategoryMeta(report.category);
+                const statusColor = getStatusColor(report.status);
+                return (
+                  <div
+                    key={report.id}
+                    className="flex flex-wrap items-center justify-between gap-3 py-3 first:pt-0 last:pb-0"
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white"
+                        style={{ backgroundColor: meta.color }}
+                      >
+                        <CategoryIcon category={report.category} size={14} />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-slate-900 dark:text-white">
+                          {report.title}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                          <span>{report.category}</span>
+                          <span>·</span>
+                          <span className={`font-bold ${statusColor}`}>{report.status}</span>
+                          <span>·</span>
+                          <span>{formatRelativeDate(report.reportedAt)}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {confirmDeleteId === report.id ? (
+                      <div className="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteReport(report)}
+                          className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-700"
+                        >
+                          Confirm Delete
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(report.id)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/70"
+                      >
+                        <Trash2 size={13} />
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </SidebarLayout>
   );

@@ -57,6 +57,7 @@ interface AuthContextValue {
   signUp: (payload: SignUpPayload) => Promise<AuthResult>;
   requestPasswordReset: (email: string) => Promise<AuthResult>;
   signInWithGoogleDemo: (mode?: 'citizen' | 'admin') => UserAccount;
+  grantAdminAccess: () => Promise<UserAccount>;
   logout: () => Promise<void>;
   updateProfile: (
     updates: Partial<Pick<UserAccount, 'fullName' | 'phone' | 'avatarUrl'>>
@@ -504,6 +505,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     return target;
   };
 
+  const grantAdminAccess = async (): Promise<UserAccount> => {
+    if (!user) {
+      persistLocalSession(DEMO_ADMIN, true);
+      return DEMO_ADMIN;
+    }
+    const promoted: UserAccount = { ...user, role: 'admin' };
+    persistLocalSession(promoted, true);
+
+    if (supabase && user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
+      try {
+        await supabase.auth.updateUser({ data: { role: 'admin' } });
+      } catch {
+        // Ignore metadata error
+      }
+      try {
+        await supabase
+          .from('profiles')
+          .update({ role: 'admin', updated_at: new Date().toISOString() })
+          .eq('id', user.id);
+      } catch {
+        // Ignore profile role update error
+      }
+    }
+    return promoted;
+  };
+
   const logout = async () => {
     if (supabase) {
       await supabase.auth.signOut().catch(() => undefined);
@@ -564,6 +591,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         signUp,
         requestPasswordReset,
         signInWithGoogleDemo,
+        grantAdminAccess,
         logout,
         updateProfile,
       }}

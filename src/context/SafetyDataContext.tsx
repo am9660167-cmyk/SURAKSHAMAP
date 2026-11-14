@@ -21,6 +21,7 @@ import {
 import { useAuth } from './AuthContext';
 
 const HAZARDS_KEY = 'surakshamap_hazards_v1';
+const DELETED_HAZARDS_KEY = 'surakshamap_deleted_hazards_v1';
 const NOTIFICATIONS_KEY = 'surakshamap_notifications_v1';
 const SETTINGS_KEY = 'surakshamap_settings_v1';
 const JOURNEY_KEY = 'surakshamap_journey_v1';
@@ -67,6 +68,7 @@ interface SafetyDataContextValue {
   confirmHazard: (hazardId: string, userId: string) => void;
   reportNotPresent: (hazardId: string, userId: string) => void;
   updateHazardStatus: (hazardId: string, status: ReportStatus) => void;
+  deleteHazardReport: (hazardId: string) => Promise<void>;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   updateSettings: (partial: Partial<UserSettings>) => void;
@@ -245,9 +247,14 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       if (!active) return;
 
       if (!hazErr && Array.isArray(hazRows)) {
+        const deletedIds = new Set(loadFromStorage<string[]>(DELETED_HAZARDS_KEY, []));
         if (hazRows.length > 0) {
-          setHazards(hazRows.map((r) => mapDbHazardToModel(r as Record<string, unknown>)));
-        } else {
+          setHazards(
+            hazRows
+              .map((r) => mapDbHazardToModel(r as Record<string, unknown>))
+              .filter((h) => !deletedIds.has(h.id))
+          );
+        } else if (deletedIds.size === 0) {
           // Seed initial hazards into empty Supabase table once
           await client
             .from('hazard_reports')
@@ -571,8 +578,11 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       const notif: NotificationItem = {
         id: `notif-${Date.now()}`,
         type: status === 'Verified' ? 'Verified Report' : 'Resolved Report',
-        title: `Report marked ${status}`,
-        message: `"${targetTitle || 'Community hazard report'}" status updated to ${status}.`,
+        title: status === 'Verified' ? 'Report Approved by Admin' : 'Report marked Resolved',
+        message:
+          status === 'Verified'
+            ? `"${targetTitle || 'Community hazard report'}" has been approved and verified by Admin.`
+            : `"${targetTitle || 'Community hazard report'}" status updated to ${status}.`,
         hazardId,
         createdAt: new Date().toISOString(),
         read: false,
@@ -592,6 +602,41 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
           created_at: notif.createdAt,
         });
       }
+    }
+  };
+
+  const deleteHazardReport = async (hazardId: string) => {
+    setHazards((prev) => prev.filter((h) => h.id !== hazardId));
+    setNotifications((prev) => prev.filter((n) => n.hazardId !== hazardId));
+
+    const prevDeleted = loadFromStorage<string[]>(DELETED_HAZARDS_KEY, []);
+    const nextDeleted = Array.from(new Set([...prevDeleted, hazardId]));
+    try {
+      localStorage.setItem(DELETED_HAZARDS_KEY, JSON.stringify(nextDeleted));
+    } catch {
+      // Ignore quota
+    }
+
+    if (supabase) {
+      try {
+        const { data: deletedRows, error } = await supabase
+          .from('hazard_reports')
+          .delete()
+          .eq('id', hazardId)
+          .select('id');
+        if (!error && Array.isArray(deletedRows) && deletedRows.length > 0) {
+          const pruned = nextDeleted.filter((id) => id !== hazardId);
+          try {
+            localStorage.setItem(DELETED_HAZARDS_KEY, JSON.stringify(pruned));
+          } catch {
+            // Ignore quota
+          }
+        }
+      } catch {
+        // Fallback keeps ID filtered locally if Supabase delete policy hasn't been applied yet
+      }
+
+      void supabase.from('notifications').delete().eq('hazard_id', hazardId);
     }
   };
 
@@ -666,6 +711,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         confirmHazard,
         reportNotPresent,
         updateHazardStatus,
+        deleteHazardReport,
         markNotificationRead,
         markAllNotificationsRead,
         updateSettings,

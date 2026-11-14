@@ -35,7 +35,8 @@ export const SidebarLayout: React.FC<SidebarProps> = ({ title, children }) => {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout, isAuthenticated } = useAuth();
-  const { unreadCount, settings, toggleTheme } = useSafetyData();
+  const { hazards, unreadCount, settings, toggleTheme } = useSafetyData();
+  const pendingCount = hazards.filter((h) => h.status === 'Pending').length;
 
   const navItems = [
     { label: 'Dashboard', to: '/dashboard', icon: LayoutDashboard },
@@ -53,7 +54,12 @@ export const SidebarLayout: React.FC<SidebarProps> = ({ title, children }) => {
     { label: 'Safety Guidelines', to: '/guidelines', icon: BookOpen },
     { label: 'Profile', to: '/profile', icon: User },
     { label: 'Settings', to: '/settings', icon: Settings },
-    { label: 'Admin Dashboard', to: '/admin', icon: ShieldCheck },
+    {
+      label: 'Admin Dashboard',
+      to: '/admin',
+      icon: ShieldCheck,
+      badge: pendingCount > 0 ? pendingCount : undefined,
+    },
   ];
 
   const handleLogout = async () => {
