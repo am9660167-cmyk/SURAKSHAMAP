@@ -1,13 +1,19 @@
-import React, { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
 import {
   AlertTriangle,
   ArrowLeft,
   CheckCircle2,
   Clock,
+  Compass,
+  Crosshair,
+  Flag,
   MapPin,
   Navigation,
+  Play,
+  RotateCcw,
   Route,
+  Square,
   Upload,
   X,
 } from 'lucide-react';
@@ -31,18 +37,46 @@ import {
   SEVERITY_OPTIONS,
 } from '../utils/hazardHelpers';
 import {
+  calculateBearingDeg,
   distancePointToPolylineKm,
   formatCoords,
   formatDistance,
+  haversineDistanceKm,
+  interpolateAlongPath,
+  projectPointOntoPath,
+  watchLiveGpsPosition,
 } from '../utils/location';
 
+type TrackingState = 'idle' | 'tracking' | 'arrived';
+
 export const JourneyResults: React.FC = () => {
+  const location = useLocation();
+  const autoStartRequested = Boolean(
+    (location.state as { autoStart?: boolean } | null)?.autoStart
+  );
+
   const { user } = useAuth();
-  const { journeyRequest, hazards, userLocation, addHazardReport } = useSafetyData();
+  const {
+    journeyRequest,
+    hazards,
+    userLocation,
+    updateUserLocation,
+    addHazardReport,
+  } = useSafetyData();
 
   const [routes, setRoutes] = useState<ComputedRouteSummary[]>([]);
   const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
   const [selectedHazard, setSelectedHazard] = useState<HazardReport | null>(null);
+
+  // Real-time GPS location-following state (moves only with user's actual movement)
+  const [trackingState, setTrackingState] = useState<TrackingState>('idle');
+  const [followLocation, setFollowLocation] = useState(true);
+  const [liveGpsPosition, setLiveGpsPosition] = useState<Coordinates | null>(null);
+  const [liveGpsHeading, setLiveGpsHeading] = useState<number | null>(null);
+  const [gpsWatchError, setGpsWatchError] = useState<string | null>(null);
+
+  const lastGpsRef = useRef<Coordinates | null>(null);
+  const autoStartedRef = useRef(false);
 
   // Click-anywhere-on-map quick report popup state
   const [reportCoords, setReportCoords] = useState<Coordinates | null>(null);
@@ -56,12 +90,142 @@ export const JourneyResults: React.FC = () => {
 
   const activeRoute = routes[selectedRouteIndex] ?? routes[0] ?? null;
 
-  // Compute all hazards within 1.5 km of the selected route path
-  const routeHazards = useMemo(() => {
-    const activePath = activeRoute?.path ?? [
+  const activePath = useMemo(
+    () =>
+      activeRoute?.path && activeRoute.path.length >= 2
+        ? activeRoute.path
+        : [journeyRequest.originCoords, journeyRequest.destinationCoords],
+    [activeRoute, journeyRequest.originCoords, journeyRequest.destinationCoords]
+  );
+
+  // If opened via "Start Journey Now", arm real GPS tracking (no fake auto-movement)
+  useEffect(() => {
+    if (autoStartRequested && !autoStartedRef.current && activeRoute) {
+      autoStartedRef.current = true;
+      setFollowLocation(true);
+      setGpsWatchError(null);
+      setTrackingState('tracking');
+    }
+  }, [autoStartRequested, activeRoute]);
+
+  // Reset tracking when origin/destination/route changes while idle
+  useEffect(() => {
+    if (trackingState === 'idle') {
+      setLiveGpsPosition(null);
+      setLiveGpsHeading(null);
+      setGpsWatchError(null);
+      lastGpsRef.current = null;
+    }
+  }, [
+    journeyRequest.originCoords.lat,
+    journeyRequest.originCoords.lng,
+    journeyRequest.destinationCoords.lat,
+    journeyRequest.destinationCoords.lng,
+    selectedRouteIndex,
+    trackingState,
+  ]);
+
+  // Continuous real device GPS watchPosition — updates marker strictly when user actually moves
+  useEffect(() => {
+    if (trackingState !== 'tracking') return;
+
+    const stopWatch = watchLiveGpsPosition(
+      (coords, headingDeg) => {
+        setGpsWatchError(null);
+        const prev = lastGpsRef.current;
+        const movedKm = prev ? haversineDistanceKm(prev, coords) : 0;
+
+        let resolvedHeading: number | null = headingDeg;
+        if (resolvedHeading === null && prev && movedKm >= 0.005) {
+          resolvedHeading = calculateBearingDeg(prev, coords);
+        }
+
+        lastGpsRef.current = coords;
+        setLiveGpsPosition(coords);
+        if (resolvedHeading !== null) {
+          setLiveGpsHeading(resolvedHeading);
+        }
+        updateUserLocation(coords);
+
+        const distToDestKm = haversineDistanceKm(
+          coords,
+          journeyRequest.destinationCoords
+        );
+        if (distToDestKm <= 0.04) {
+          setTrackingState('arrived');
+        }
+      },
+      (errMsg) => {
+        setGpsWatchError(
+          errMsg ||
+            'Device GPS is unavailable or blocked here. Enable location permissions in your browser so the marker moves with you.'
+        );
+      }
+    );
+
+    return () => {
+      stopWatch();
+    };
+  }, [trackingState, journeyRequest.destinationCoords, updateUserLocation]);
+
+  // Project user's live GPS location onto the active route when they are along the corridor
+  const routeProjection = useMemo(() => {
+    if (!liveGpsPosition) return null;
+    const proj = projectPointOntoPath(liveGpsPosition, activePath);
+    const interpolated = interpolateAlongPath(activePath, proj.progress01);
+    return {
+      ...proj,
+      interpolated,
+    };
+  }, [liveGpsPosition, activePath]);
+
+  const isOnRouteCorridor =
+    routeProjection !== null && routeProjection.distanceFromRouteKm <= 1.5;
+
+  const currentMarkerPosition: Coordinates | undefined =
+    trackingState === 'idle'
+      ? undefined
+      : liveGpsPosition ?? journeyRequest.originCoords;
+
+  const initialRouteHeading = useMemo(() => {
+    if (activePath.length >= 2) {
+      return calculateBearingDeg(activePath[0], activePath[1]);
+    }
+    return calculateBearingDeg(
       journeyRequest.originCoords,
-      journeyRequest.destinationCoords,
-    ];
+      journeyRequest.destinationCoords
+    );
+  }, [activePath, journeyRequest.originCoords, journeyRequest.destinationCoords]);
+
+  const currentMarkerHeading: number | undefined =
+    trackingState === 'idle'
+      ? undefined
+      : liveGpsHeading ??
+        (isOnRouteCorridor
+          ? routeProjection?.headingDeg
+          : initialRouteHeading);
+
+  const totalDistanceKm = activeRoute
+    ? activeRoute.distanceMeters / 1000
+    : haversineDistanceKm(
+        journeyRequest.originCoords,
+        journeyRequest.destinationCoords
+      );
+  const totalDurationMins = activeRoute
+    ? Math.max(1, Math.round(activeRoute.durationMillis / 60000))
+    : Math.max(1, Math.round((totalDistanceKm / 30) * 60));
+
+  const progress01 = isOnRouteCorridor
+    ? routeProjection?.progress01 ?? 0
+    : 0;
+  const remainingDistanceKm = liveGpsPosition
+    ? isOnRouteCorridor
+      ? Math.max(0, totalDistanceKm * (1 - progress01))
+      : haversineDistanceKm(liveGpsPosition, journeyRequest.destinationCoords)
+    : totalDistanceKm;
+
+  // Compute all hazards within 1.8 km of the selected route path
+  const routeHazards = useMemo(() => {
     return hazards
       .filter((h) => h.status !== 'Rejected' && h.status !== 'Resolved')
       .map((h) => ({
@@ -70,7 +234,22 @@ export const JourneyResults: React.FC = () => {
       }))
       .filter((item) => item.distanceKm <= 1.8)
       .sort((a, b) => a.distanceKm - b.distanceKm);
-  }, [hazards, activeRoute, journeyRequest]);
+  }, [hazards, activePath]);
+
+  // Nearest hazard relative to user's actual location (while tracking)
+  const upcomingHazard = useMemo(() => {
+    if (trackingState !== 'tracking' || !liveGpsPosition || routeHazards.length === 0) {
+      return null;
+    }
+    let closest: { hazard: HazardReport; distFromUserKm: number } | null = null;
+    for (const item of routeHazards) {
+      const d = haversineDistanceKm(liveGpsPosition, item.hazard.location);
+      if (d <= 1.2 && (!closest || d < closest.distFromUserKm)) {
+        closest = { hazard: item.hazard, distFromUserKm: d };
+      }
+    }
+    return closest;
+  }, [trackingState, liveGpsPosition, routeHazards]);
 
   const counts = useMemo(() => {
     const critical = routeHazards.filter(
@@ -91,6 +270,23 @@ export const JourneyResults: React.FC = () => {
     const match = routeHazards.find((r) => r.hazard.id === selectedHazard.id);
     return match?.distanceKm;
   }, [selectedHazard, routeHazards]);
+
+  const handleStartTracking = () => {
+    lastGpsRef.current = null;
+    setLiveGpsPosition(null);
+    setLiveGpsHeading(null);
+    setGpsWatchError(null);
+    setFollowLocation(true);
+    setTrackingState('tracking');
+  };
+
+  const handleStopTracking = () => {
+    setTrackingState('idle');
+    setLiveGpsPosition(null);
+    setLiveGpsHeading(null);
+    setGpsWatchError(null);
+    setFollowLocation(true);
+  };
 
   const handleQuickPhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -141,10 +337,12 @@ export const JourneyResults: React.FC = () => {
       2,
   };
 
+  const isTracking = trackingState === 'tracking';
+
   return (
     <SidebarLayout title="Journey Route & Hazard Analysis">
       <div className="mx-auto max-w-7xl space-y-5">
-        {/* Top Journey Header */}
+        {/* Top Journey Header + Real-Time Location Tracking Controls */}
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-5 py-4 dark:border-slate-800 dark:bg-slate-900">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
@@ -152,32 +350,178 @@ export const JourneyResults: React.FC = () => {
                 {journeyRequest.travelMode}
               </span>
               <span aria-hidden="true">·</span>
-              <span>{journeyRequest.originLabel}</span>
+              <span className="font-medium text-slate-700 dark:text-slate-200">
+                {journeyRequest.originLabel}
+              </span>
               <span aria-hidden="true">→</span>
-              <span>{journeyRequest.destinationLabel}</span>
+              <span className="font-medium text-slate-700 dark:text-slate-200">
+                {journeyRequest.destinationLabel}
+              </span>
             </div>
             {activeRoute && (
               <div className="flex flex-wrap items-center gap-4 text-sm font-bold text-[#14213D] dark:text-white">
                 <span className="inline-flex items-center gap-1.5 font-mono tabular-nums">
                   <Route size={15} className="text-[#2563EB]" />
-                  {(activeRoute.distanceMeters / 1000).toFixed(2)} km
+                  {isTracking && liveGpsPosition
+                    ? `${remainingDistanceKm.toFixed(2)} km to destination`
+                    : `${totalDistanceKm.toFixed(2)} km`}
                 </span>
                 <span className="inline-flex items-center gap-1.5 font-mono tabular-nums">
                   <Clock size={15} className="text-[#2563EB]" />
-                  {Math.max(1, Math.round(activeRoute.durationMillis / 60000))} mins
+                  {trackingState === 'arrived'
+                    ? 'Arrived'
+                    : `${totalDurationMins} mins`}
                 </span>
+                {isTracking && liveGpsPosition && currentMarkerHeading !== undefined && (
+                  <span className="inline-flex items-center gap-1.5 font-mono text-xs text-emerald-700 dark:text-emerald-400">
+                    <Compass size={14} />
+                    Live GPS · {Math.round(currentMarkerHeading)}°
+                  </span>
+                )}
               </div>
             )}
           </div>
 
-          <Link
-            to="/plan-journey"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <ArrowLeft size={14} />
-            Edit Journey
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            {trackingState === 'idle' && (
+              <button
+                type="button"
+                onClick={handleStartTracking}
+                className="inline-flex items-center gap-2 rounded-lg bg-[#16A34A] px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700"
+              >
+                <Play size={14} className="fill-current" />
+                Start Journey (Follow My GPS)
+              </button>
+            )}
+
+            {isTracking && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setFollowLocation(true)}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
+                    followLocation
+                      ? 'border-blue-200 bg-blue-50 text-[#2563EB] dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-400'
+                      : 'border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <Crosshair size={14} />
+                  {followLocation ? 'Following My GPS' : 'Recenter on Me'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopTracking}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/40"
+                >
+                  <Square size={13} className="fill-current" />
+                  Stop Tracking
+                </button>
+              </>
+            )}
+
+            {trackingState === 'arrived' && (
+              <button
+                type="button"
+                onClick={handleStartTracking}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#2563EB] px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+              >
+                <RotateCcw size={14} />
+                Track Again
+              </button>
+            )}
+
+            <Link
+              to="/plan-journey"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <ArrowLeft size={14} />
+              Edit Journey
+            </Link>
+          </div>
         </div>
+
+        {/* Real GPS Tracking Status Banner (no simulation — moves strictly with user movement) */}
+        {trackingState !== 'idle' && (
+          <div className="rounded-xl border border-blue-200 bg-[#F8FAFC] p-4 dark:border-blue-900/60 dark:bg-slate-900">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span
+                  className={`flex h-9 w-9 items-center justify-center rounded-lg text-white ${
+                    trackingState === 'arrived' ? 'bg-emerald-600' : 'bg-[#2563EB]'
+                  }`}
+                >
+                  {trackingState === 'arrived' ? (
+                    <Flag size={17} />
+                  ) : (
+                    <Navigation size={17} />
+                  )}
+                </span>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-[#14213D] dark:text-white">
+                    <span>
+                      {trackingState === 'arrived'
+                        ? `Arrived near ${journeyRequest.destinationLabel}`
+                        : liveGpsPosition
+                        ? 'Your Location Marker Is Following Your Real GPS'
+                        : 'Waiting for Your Device GPS Signal...'}
+                    </span>
+                    {liveGpsPosition && (
+                      <span className="font-mono text-[11px] font-normal text-slate-500 dark:text-slate-400">
+                        ({formatCoords(liveGpsPosition)})
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-xs text-slate-600 dark:text-slate-300">
+                    {trackingState === 'arrived'
+                      ? 'You have reached your destination.'
+                      : gpsWatchError
+                      ? gpsWatchError
+                      : 'The triangle marker stays at your current position and moves with you as you travel along the route.'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {isOnRouteCorridor && isTracking && (
+              <div className="mt-3">
+                <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                  <span>
+                    Route Progress: {Math.round(progress01 * 100)}%
+                  </span>
+                  <span>
+                    Remaining: {remainingDistanceKm.toFixed(2)} km
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                  <div
+                    className="h-full rounded-full bg-[#2563EB] transition-all duration-300"
+                    style={{ width: `${Math.round(progress01 * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {upcomingHazard && isTracking && (
+              <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200">
+                <span className="inline-flex items-center gap-2 font-medium">
+                  <AlertTriangle size={15} className="shrink-0 text-amber-600 dark:text-amber-400" />
+                  <span>
+                    <strong>{upcomingHazard.hazard.severity} Alert Nearby:</strong>{' '}
+                    {upcomingHazard.hazard.title} (
+                    {formatDistance(upcomingHazard.distFromUserKm)} from your location)
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedHazard(upcomingHazard.hazard)}
+                  className="shrink-0 font-semibold text-[#2563EB] hover:underline dark:text-blue-400"
+                >
+                  Inspect
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {justReportedTitle && (
           <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300">
@@ -210,12 +554,34 @@ export const JourneyResults: React.FC = () => {
               travelMode={journeyRequest.travelMode}
               selectedRouteIndex={selectedRouteIndex}
               onRoutesComputed={setRoutes}
+              navigationPosition={currentMarkerPosition}
+              navigationHeading={currentMarkerHeading}
+              isNavigating={isTracking}
+              followNavigation={followLocation && Boolean(liveGpsPosition)}
+              traveledPath={
+                isTracking && isOnRouteCorridor
+                  ? routeProjection?.interpolated.traveledPath
+                  : undefined
+              }
+              remainingPath={
+                isTracking && isOnRouteCorridor
+                  ? routeProjection?.interpolated.remainingPath
+                  : undefined
+              }
+              showRouteTriangle
+              onUserPan={() => {
+                if (isTracking) setFollowLocation(false);
+              }}
               onMapClick={(coords) => {
                 setReportCoords(coords);
                 setQuickError('');
               }}
-              heightClass="h-[520px]"
-              interactiveHint="Click anywhere on the route map to report a new hazard at that spot"
+              heightClass="h-[540px]"
+              interactiveHint={
+                isTracking
+                  ? 'GPS tracking active — your triangle marker moves automatically as you travel along the route'
+                  : 'Directional triangle marks your route heading · Click anywhere to report a hazard'
+              }
             />
 
             {/* Selected Marker Detailed Inspector */}

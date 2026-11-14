@@ -74,6 +74,7 @@ interface SafetyDataContextValue {
   updateSettings: (partial: Partial<UserSettings>) => void;
   toggleTheme: () => void;
   setJourneyRequest: (req: JourneyRequest) => void;
+  updateUserLocation: (coords: Coordinates) => void;
   resetDemoData: () => void;
 }
 
@@ -717,6 +718,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         updateSettings,
         toggleTheme,
         setJourneyRequest,
+        updateUserLocation: setUserLocation,
         resetDemoData,
       }}
     >

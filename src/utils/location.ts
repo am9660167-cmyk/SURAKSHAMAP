@@ -345,3 +345,243 @@ export function buildSimulatedRoutePaths(
 
   return { primary, alternative };
 }
+
+export function calculateBearingDeg(from: Coordinates, to: Coordinates): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const toDeg = (rad: number) => (rad * 180) / Math.PI;
+
+  const lat1 = toRad(from.lat);
+  const lat2 = toRad(to.lat);
+  const dLng = toRad(to.lng - from.lng);
+
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+
+  const bearing = (toDeg(Math.atan2(y, x)) + 360) % 360;
+  return Number.isFinite(bearing) ? bearing : 0;
+}
+
+export function getPathTotalKm(path: Coordinates[]): number {
+  if (path.length < 2) return 0;
+  let total = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    total += haversineDistanceKm(path[i], path[i + 1]);
+  }
+  return total;
+}
+
+export interface InterpolatedPathState {
+  position: Coordinates;
+  headingDeg: number;
+  traveledPath: Coordinates[];
+  remainingPath: Coordinates[];
+  traveledKm: number;
+  remainingKm: number;
+  totalKm: number;
+  progress01: number;
+}
+
+export function interpolateAlongPath(
+  path: Coordinates[],
+  rawProgress01: number
+): InterpolatedPathState {
+  if (path.length === 0) {
+    const fallback = DEFAULT_MAP_CENTER;
+    return {
+      position: fallback,
+      headingDeg: 0,
+      traveledPath: [fallback],
+      remainingPath: [fallback],
+      traveledKm: 0,
+      remainingKm: 0,
+      totalKm: 0,
+      progress01: 0,
+    };
+  }
+  if (path.length === 1) {
+    return {
+      position: path[0],
+      headingDeg: 0,
+      traveledPath: [path[0]],
+      remainingPath: [path[0]],
+      traveledKm: 0,
+      remainingKm: 0,
+      totalKm: 0,
+      progress01: 1,
+    };
+  }
+
+  const progress01 = Math.max(0, Math.min(1, rawProgress01));
+  const segLengths: number[] = [];
+  let totalKm = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const d = haversineDistanceKm(path[i], path[i + 1]);
+    segLengths.push(d);
+    totalKm += d;
+  }
+
+  if (totalKm <= 0.0001) {
+    const headingDeg = calculateBearingDeg(path[0], path[path.length - 1]);
+    return {
+      position: path[0],
+      headingDeg,
+      traveledPath: [path[0]],
+      remainingPath: path,
+      traveledKm: 0,
+      remainingKm: 0,
+      totalKm: 0,
+      progress01,
+    };
+  }
+
+  const targetKm = totalKm * progress01;
+  let accumulatedKm = 0;
+
+  for (let i = 0; i < segLengths.length; i++) {
+    const segKm = segLengths[i];
+    const start = path[i];
+    const end = path[i + 1];
+
+    if (accumulatedKm + segKm >= targetKm || i === segLengths.length - 1) {
+      const localFraction =
+        segKm > 0 ? Math.max(0, Math.min(1, (targetKm - accumulatedKm) / segKm)) : 0;
+      const position: Coordinates = {
+        lat: Number((start.lat + (end.lat - start.lat) * localFraction).toFixed(6)),
+        lng: Number((start.lng + (end.lng - start.lng) * localFraction).toFixed(6)),
+      };
+      const headingDeg = calculateBearingDeg(start, end);
+      const traveledPath = [...path.slice(0, i + 1), position];
+      const remainingPath = [position, ...path.slice(i + 1)];
+
+      return {
+        position,
+        headingDeg,
+        traveledPath,
+        remainingPath,
+        traveledKm: targetKm,
+        remainingKm: Math.max(0, totalKm - targetKm),
+        totalKm,
+        progress01,
+      };
+    }
+    accumulatedKm += segKm;
+  }
+
+  const lastHeading = calculateBearingDeg(path[path.length - 2], path[path.length - 1]);
+  return {
+    position: path[path.length - 1],
+    headingDeg: lastHeading,
+    traveledPath: path,
+    remainingPath: [path[path.length - 1]],
+    traveledKm: totalKm,
+    remainingKm: 0,
+    totalKm,
+    progress01: 1,
+  };
+}
+
+export function projectPointOntoPath(
+  point: Coordinates,
+  path: Coordinates[]
+): {
+  progress01: number;
+  distanceFromRouteKm: number;
+  headingDeg: number;
+  closestPoint: Coordinates;
+} {
+  if (path.length < 2) {
+    return {
+      progress01: 0,
+      distanceFromRouteKm: path[0] ? haversineDistanceKm(point, path[0]) : 0,
+      headingDeg: 0,
+      closestPoint: path[0] ?? point,
+    };
+  }
+
+  const segLengths: number[] = [];
+  let totalKm = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const d = haversineDistanceKm(path[i], path[i + 1]);
+    segLengths.push(d);
+    totalKm += d;
+  }
+
+  let bestDistKm = Infinity;
+  let bestProgressKm = 0;
+  let bestHeading = calculateBearingDeg(path[0], path[1]);
+  let bestClosest = path[0];
+  let accKm = 0;
+
+  for (let i = 0; i < path.length - 1; i++) {
+    const v = path[i];
+    const w = path[i + 1];
+    const l2 = Math.pow(w.lat - v.lat, 2) + Math.pow(w.lng - v.lng, 2);
+    let t = 0;
+    if (l2 > 0) {
+      t = ((point.lat - v.lat) * (w.lat - v.lat) + (point.lng - v.lng) * (w.lng - v.lng)) / l2;
+      t = Math.max(0, Math.min(1, t));
+    }
+    const proj: Coordinates = {
+      lat: v.lat + t * (w.lat - v.lat),
+      lng: v.lng + t * (w.lng - v.lng),
+    };
+    const dKm = haversineDistanceKm(point, proj);
+    if (dKm < bestDistKm) {
+      bestDistKm = dKm;
+      bestProgressKm = accKm + segLengths[i] * t;
+      bestHeading = calculateBearingDeg(v, w);
+      bestClosest = proj;
+    }
+    accKm += segLengths[i];
+  }
+
+  return {
+    progress01: totalKm > 0 ? Math.max(0, Math.min(1, bestProgressKm / totalKm)) : 0,
+    distanceFromRouteKm: bestDistKm,
+    headingDeg: bestHeading,
+    closestPoint: bestClosest,
+  };
+}
+
+export function watchLiveGpsPosition(
+  onUpdate: (coords: Coordinates, headingDeg: number | null, speedMps: number | null) => void,
+  onError?: (message: string) => void
+): () => void {
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    onError?.('Browser geolocation is unavailable.');
+    return () => {};
+  }
+
+  const watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      const coords: Coordinates = {
+        lat: Number(pos.coords.latitude.toFixed(6)),
+        lng: Number(pos.coords.longitude.toFixed(6)),
+      };
+      const heading =
+        typeof pos.coords.heading === 'number' && Number.isFinite(pos.coords.heading)
+          ? pos.coords.heading
+          : null;
+      const speed =
+        typeof pos.coords.speed === 'number' && Number.isFinite(pos.coords.speed)
+          ? pos.coords.speed
+          : null;
+      onUpdate(coords, heading, speed);
+    },
+    (err) => {
+      onError?.(err.message || 'Unable to track continuous GPS.');
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 1500,
+      timeout: 10000,
+    }
+  );
+
+  return () => {
+    navigator.geolocation.clearWatch(watchId);
+  };
+}
+

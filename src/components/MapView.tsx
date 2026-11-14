@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import L from 'leaflet';
+import L from '../lib/leafletWithRotate';
 import 'leaflet/dist/leaflet.css';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   CheckCircle2,
+  Compass,
   Crosshair,
   Loader2,
   Minus,
@@ -23,6 +24,7 @@ import {
 } from '../utils/hazardHelpers';
 import {
   buildSimulatedRoutePaths,
+  calculateBearingDeg,
   DEFAULT_MAP_CENTER,
   formatCoords,
   formatDistance,
@@ -56,6 +58,15 @@ interface MapViewProps {
   onRoutesComputed?: (routes: ComputedRouteSummary[]) => void;
   showConfigNotice?: boolean;
   interactiveHint?: string;
+  navigationPosition?: Coordinates | null;
+  navigationHeading?: number;
+  isNavigating?: boolean;
+  followNavigation?: boolean;
+  traveledPath?: Coordinates[];
+  remainingPath?: Coordinates[];
+  showRouteTriangle?: boolean;
+  orientTowardsDestination?: boolean;
+  onUserPan?: () => void;
 }
 
 const HazardInfoCard: React.FC<{
@@ -171,12 +182,37 @@ function createHazardDivIcon(hazard: HazardReport, selected: boolean): L.DivIcon
   });
 }
 
-function createPinBadgeIcon(label: string, bg: string): L.DivIcon {
+function createOriginBadgeIcon(): L.DivIcon {
   return L.divIcon({
     className: 'suraksha-div-icon',
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    html: `<div style="width:28px;height:28px;border-radius:9999px;background:${bg};color:#ffffff;border:2px solid #ffffff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;box-shadow:0 3px 8px rgba(0,0,0,0.3);">${label}</div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+    html: `<div style="width:22px;height:22px;border-radius:9999px;background:#ffffff;border:4px solid #16A34A;box-shadow:0 2px 8px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;"><div style="width:6px;height:6px;border-radius:9999px;background:#16A34A;"></div></div>`,
+  });
+}
+
+function createDestinationPinIcon(): L.DivIcon {
+  return L.divIcon({
+    className: 'suraksha-div-icon',
+    iconSize: [34, 42],
+    iconAnchor: [17, 40],
+    html: `<div style="display:flex;flex-direction:column;align-items:center;filter:drop-shadow(0 4px 6px rgba(0,0,0,0.35));"><svg width="32" height="40" viewBox="0 0 32 40" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M16 1C8.268 1 2 7.268 2 15C2 25.5 16 39 16 39C16 39 30 25.5 30 15C30 7.268 23.732 1 16 1Z" fill="#DC2626" stroke="#FFFFFF" stroke-width="2.5"/><circle cx="16" cy="15" r="5.5" fill="#FFFFFF"/></svg></div>`,
+  });
+}
+
+function createNavigationTriangleIcon(
+  headingDeg: number,
+  isActiveNav: boolean
+): L.DivIcon {
+  const halo = isActiveNav
+    ? 'box-shadow: 0 0 0 8px rgba(37,99,235,0.22), 0 4px 12px rgba(15,23,42,0.35);'
+    : 'box-shadow: 0 0 0 4px rgba(37,99,235,0.16), 0 4px 10px rgba(15,23,42,0.3);';
+
+  return L.divIcon({
+    className: 'suraksha-div-icon',
+    iconSize: [40, 40],
+    iconAnchor: [20, 20],
+    html: `<div style="width:40px;height:40px;border-radius:9999px;background:rgba(255,255,255,0.95);${halo}display:flex;align-items:center;justify-content:center;border:2px solid #2563EB;"><div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;transform:rotate(${headingDeg.toFixed(1)}deg);transition:transform 220ms linear;"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2.5L20.5 20.5L12 16.2L3.5 20.5L12 2.5Z" fill="#2563EB" stroke="#1E3A8A" stroke-width="1.6" stroke-linejoin="round"/></svg></div></div>`,
   });
 }
 
@@ -275,27 +311,66 @@ export const MapView: React.FC<MapViewProps> = ({
   selectedRouteIndex = 0,
   onRoutesComputed,
   interactiveHint,
+  navigationPosition,
+  navigationHeading,
+  isNavigating = false,
+  followNavigation = false,
+  traveledPath,
+  remainingPath,
+  showRouteTriangle = true,
+  orientTowardsDestination = true,
+  onUserPan,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const hazardLayerRef = useRef<L.LayerGroup | null>(null);
   const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
+  const navMarkerRef = useRef<L.Marker | null>(null);
+  const lastFittedKeyRef = useRef<string>('');
+  const wasNavigatingRef = useRef<boolean>(false);
 
   const onPickerChangeRef = useRef(onPickerChange);
   const onMapClickRef = useRef(onMapClick);
   const onSelectHazardRef = useRef(onSelectHazard);
   const onRoutesComputedRef = useRef(onRoutesComputed);
+  const onUserPanRef = useRef(onUserPan);
 
   onPickerChangeRef.current = onPickerChange;
   onMapClickRef.current = onMapClick;
   onSelectHazardRef.current = onSelectHazard;
   onRoutesComputedRef.current = onRoutesComputed;
+  onUserPanRef.current = onUserPan;
 
   const [internalSelected, setInternalSelected] = useState<HazardReport | null>(null);
   const [viewCenter, setViewCenter] = useState<Coordinates>(center);
   const [currentZoom, setCurrentZoom] = useState<number>(zoom);
   const [computedRoutes, setComputedRoutes] = useState<ComputedRouteSummary[]>([]);
+  const [cameraMode, setCameraMode] = useState<'forward' | 'north-up'>(
+    orientTowardsDestination ? 'forward' : 'north-up'
+  );
+
+  useEffect(() => {
+    setCameraMode(orientTowardsDestination ? 'forward' : 'north-up');
+  }, [orientTowardsDestination]);
+
+  const hasRoute = Boolean(routeOrigin && routeDestination);
+  const isForwardCamera = hasRoute && cameraMode === 'forward';
+
+  const cameraWorldHeading = (() => {
+    if (!routeOrigin || !routeDestination) return 0;
+    if (isNavigating && navigationHeading !== undefined) {
+      return navigationHeading;
+    }
+    const originPoint =
+      isNavigating && navigationPosition ? navigationPosition : routeOrigin;
+    return calculateBearingDeg(originPoint, routeDestination);
+  })();
+
+  const activeMapBearing = isForwardCamera
+    ? (360 - cameraWorldHeading) % 360
+    : 0;
+  const activeMapPitch = isForwardCamera ? 34 : 0;
 
   const activeHazard =
     selectedHazard !== undefined ? selectedHazard : internalSelected;
@@ -305,7 +380,7 @@ export const MapView: React.FC<MapViewProps> = ({
     onSelectHazardRef.current?.(h);
   };
 
-  // Initialize Leaflet Map once
+  // Initialize Leaflet Map once with rotation & pitch support
   useEffect(() => {
     const el = containerRef.current;
     if (!el || mapRef.current) return;
@@ -314,6 +389,12 @@ export const MapView: React.FC<MapViewProps> = ({
       center: [center.lat, center.lng],
       zoom,
       zoomControl: false,
+      rotate: true,
+      rotateControl: false,
+      touchRotate: true,
+      shiftKeyRotate: true,
+      bearing: 0,
+      pitch: 0,
     });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -339,6 +420,10 @@ export const MapView: React.FC<MapViewProps> = ({
       onMapClickRef.current?.(coords);
     });
 
+    map.on('dragstart', () => {
+      onUserPanRef.current?.();
+    });
+
     map.on('moveend zoomend', () => {
       const c = map.getCenter();
       setViewCenter({
@@ -355,6 +440,8 @@ export const MapView: React.FC<MapViewProps> = ({
 
     return () => {
       resizeObserver.disconnect();
+      navMarkerRef.current?.remove();
+      navMarkerRef.current = null;
       map.remove();
       mapRef.current = null;
       routeLayerRef.current = null;
@@ -363,13 +450,21 @@ export const MapView: React.FC<MapViewProps> = ({
     };
   }, []);
 
-  // Sync map view when center prop changes externally
+  // Sync map view when center prop changes externally (skipped during live navigation)
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || isNavigating) return;
+    map.setView([center.lat, center.lng], map.getZoom(), { animate: true });
+    setViewCenter(center);
+  }, [center.lat, center.lng, isNavigating]);
+
+  // Rotate & tilt camera from user/starting location towards destination
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
-    map.setView([center.lat, center.lng], map.getZoom(), { animate: true });
-    setViewCenter(center);
-  }, [center.lat, center.lng]);
+    map.setBearing(activeMapBearing, { animate: true, duration: 0.45 });
+    map.setPitch(activeMapPitch, { animate: true, duration: 0.45 });
+  }, [activeMapBearing, activeMapPitch]);
 
   // Render Hazard Markers
   useEffect(() => {
@@ -400,7 +495,7 @@ export const MapView: React.FC<MapViewProps> = ({
     if (!group) return;
     group.clearLayers();
 
-    if (userLocation) {
+    if (userLocation && !isNavigating && !(showRouteTriangle && routeOrigin && routeDestination)) {
       L.marker([userLocation.lat, userLocation.lng], {
         icon: createUserLocationIcon(),
         title: 'Your Location',
@@ -431,17 +526,17 @@ export const MapView: React.FC<MapViewProps> = ({
 
     if (routeOrigin) {
       L.marker([routeOrigin.lat, routeOrigin.lng], {
-        icon: createPinBadgeIcon('A', '#16A34A'),
-        title: 'Starting Point',
-        zIndexOffset: 550,
+        icon: createOriginBadgeIcon(),
+        title: 'Starting Location',
+        zIndexOffset: 540,
       }).addTo(group);
     }
 
     if (routeDestination) {
       L.marker([routeDestination.lat, routeDestination.lng], {
-        icon: createPinBadgeIcon('B', '#DC2626'),
+        icon: createDestinationPinIcon(),
         title: 'Destination',
-        zIndexOffset: 550,
+        zIndexOffset: 560,
       }).addTo(group);
     }
   }, [
@@ -454,6 +549,84 @@ export const MapView: React.FC<MapViewProps> = ({
     routeDestination?.lat,
     routeDestination?.lng,
     Boolean(onPickerChange),
+    isNavigating,
+    showRouteTriangle,
+  ]);
+
+  // Persistent Google-Maps-style Directional Triangle Marker + Smooth Follow-Me Camera
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const selectedRoute = computedRoutes[selectedRouteIndex] ?? computedRoutes[0];
+    let targetPos: Coordinates | null = navigationPosition ?? null;
+    let targetHeading = navigationHeading ?? 0;
+
+    if (!targetPos && showRouteTriangle && routeOrigin && routeDestination) {
+      targetPos = routeOrigin;
+      if (selectedRoute && selectedRoute.path.length >= 2) {
+        targetHeading = calculateBearingDeg(selectedRoute.path[0], selectedRoute.path[1]);
+      } else {
+        targetHeading = calculateBearingDeg(routeOrigin, routeDestination);
+      }
+    } else if (targetPos && navigationHeading === undefined && routeDestination) {
+      targetHeading = calculateBearingDeg(targetPos, routeDestination);
+    }
+
+    if (!targetPos) {
+      if (navMarkerRef.current) {
+        navMarkerRef.current.remove();
+        navMarkerRef.current = null;
+      }
+      wasNavigatingRef.current = false;
+      return;
+    }
+
+    const screenHeading = (targetHeading + activeMapBearing) % 360;
+    const icon = createNavigationTriangleIcon(screenHeading, isNavigating);
+    if (!navMarkerRef.current) {
+      navMarkerRef.current = L.marker([targetPos.lat, targetPos.lng], {
+        icon,
+        title: isNavigating ? 'Your Live Location' : 'Starting Navigation Heading',
+        zIndexOffset: 900,
+        interactive: false,
+      }).addTo(map);
+    } else {
+      navMarkerRef.current.setLatLng([targetPos.lat, targetPos.lng]);
+      navMarkerRef.current.setIcon(icon);
+    }
+
+    if (isNavigating && followNavigation) {
+      const justStarted = !wasNavigatingRef.current;
+      wasNavigatingRef.current = true;
+      if (justStarted) {
+        map.setView([targetPos.lat, targetPos.lng], Math.max(map.getZoom(), 15), {
+          animate: true,
+          duration: 0.5,
+        });
+      } else {
+        map.panTo([targetPos.lat, targetPos.lng], {
+          animate: true,
+          duration: 0.35,
+        });
+      }
+    } else if (!isNavigating) {
+      wasNavigatingRef.current = false;
+    }
+  }, [
+    navigationPosition?.lat,
+    navigationPosition?.lng,
+    navigationHeading,
+    activeMapBearing,
+    isNavigating,
+    followNavigation,
+    showRouteTriangle,
+    routeOrigin?.lat,
+    routeOrigin?.lng,
+    routeDestination?.lat,
+    routeDestination?.lng,
+    computedRoutes,
+    selectedRouteIndex,
   ]);
 
   // Fetch OpenStreetMap OSRM Routes when routeOrigin & routeDestination exist
@@ -582,27 +755,93 @@ export const MapView: React.FC<MapViewProps> = ({
 
     ordered.forEach((route) => {
       const isSelected = route.index === selectedRouteIndex;
-      const latLngs: L.LatLngExpression[] = route.path.map((pt) => [pt.lat, pt.lng]);
-      L.polyline(latLngs, {
-        color: isSelected ? '#2563EB' : '#64748B',
-        weight: isSelected ? 6 : 4,
-        opacity: isSelected ? 0.92 : 0.6,
-        dashArray: isSelected ? undefined : '8 8',
+      if (!isSelected) {
+        const latLngs: L.LatLngExpression[] = route.path.map((pt) => [pt.lat, pt.lng]);
+        L.polyline(latLngs, {
+          color: '#64748B',
+          weight: 4,
+          opacity: 0.55,
+          dashArray: '8 8',
+        }).addTo(group);
+        return;
+      }
+
+      if (isNavigating && traveledPath && traveledPath.length >= 2) {
+        L.polyline(
+          traveledPath.map((pt) => [pt.lat, pt.lng] as L.LatLngExpression),
+          {
+            color: '#94A3B8',
+            weight: 6,
+            opacity: 0.75,
+          }
+        ).addTo(group);
+      }
+
+      const activeAhead =
+        isNavigating && remainingPath && remainingPath.length >= 2
+          ? remainingPath
+          : route.path;
+
+      const activeLatLngs: L.LatLngExpression[] = activeAhead.map((pt) => [
+        pt.lat,
+        pt.lng,
+      ]);
+
+      // Google-Maps-style route casing + vibrant blue path
+      L.polyline(activeLatLngs, {
+        color: '#1E3A8A',
+        weight: 9,
+        opacity: 0.9,
+      }).addTo(group);
+
+      L.polyline(activeLatLngs, {
+        color: '#3B82F6',
+        weight: 5,
+        opacity: 1,
       }).addTo(group);
     });
 
     const target = computedRoutes[selectedRouteIndex] ?? computedRoutes[0];
-    if (target && target.path.length >= 2) {
+    const routeFitKey = `${routeOrigin?.lat},${routeOrigin?.lng}->${routeDestination?.lat},${routeDestination?.lng}:${selectedRouteIndex}:${target?.path.length ?? 0}`;
+    if (
+      !isNavigating &&
+      target &&
+      target.path.length >= 2 &&
+      lastFittedKeyRef.current !== routeFitKey
+    ) {
+      lastFittedKeyRef.current = routeFitKey;
       const bounds = L.latLngBounds(
         target.path.map((pt) => [pt.lat, pt.lng] as L.LatLngTuple)
       );
-      map.fitBounds(bounds, { padding: [44, 44], maxZoom: 15 });
+      map.fitBounds(bounds, {
+        paddingTopLeft: [48, 72],
+        paddingBottomRight: [48, 56],
+        maxZoom: 15,
+      });
     }
-  }, [computedRoutes, selectedRouteIndex]);
+  }, [
+    computedRoutes,
+    selectedRouteIndex,
+    isNavigating,
+    traveledPath,
+    remainingPath,
+    routeOrigin?.lat,
+    routeOrigin?.lng,
+    routeDestination?.lat,
+    routeDestination?.lng,
+  ]);
 
   return (
     <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-      <div className={`relative isolate w-full ${heightClass}`}>
+      <div
+        className={`relative isolate w-full ${heightClass}`}
+        style={
+          {
+            '--leaflet-sky-background':
+              'linear-gradient(to bottom, #dbeafe 0%, #eff6ff 55%, #f8fafc 100%)',
+          } as React.CSSProperties
+        }
+      >
         <div
           ref={containerRef}
           className="h-full w-full"
@@ -610,15 +849,36 @@ export const MapView: React.FC<MapViewProps> = ({
         />
 
         {interactiveHint && (
-          <div className="pointer-events-none absolute left-3 top-3 z-[450] rounded-lg border border-slate-200/90 bg-white/95 px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/95 dark:text-slate-200">
+          <div className="pointer-events-none absolute left-3 top-3 z-[450] max-w-[calc(100%-12rem)] rounded-lg border border-slate-200/90 bg-white/95 px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/95 dark:text-slate-200">
             {interactiveHint}
           </div>
+        )}
+
+        {hasRoute && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setCameraMode((prev) => (prev === 'forward' ? 'north-up' : 'forward'));
+            }}
+            title="Switch between forward route view (from your location towards destination) and top-down North-Up view"
+            className={`absolute right-3 top-3 z-[455] inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold shadow-sm backdrop-blur transition-colors ${
+              isForwardCamera
+                ? 'border-[#2563EB] bg-[#2563EB] text-white hover:bg-blue-700'
+                : 'border-slate-200/90 bg-white/95 text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900/95 dark:text-slate-200'
+            }`}
+          >
+            <Compass size={13} />
+            {isForwardCamera ? 'Towards Destination (3D)' : 'Top-Down North'}
+          </button>
         )}
 
         {activeHazard && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-14 left-3 z-[460] sm:bottom-auto sm:left-auto sm:right-3 sm:top-3"
+            className={`absolute bottom-14 left-3 z-[460] sm:bottom-auto sm:left-auto sm:right-3 ${
+              hasRoute ? 'sm:top-13' : 'sm:top-3'
+            }`}
           >
             <HazardInfoCard
               hazard={activeHazard}
