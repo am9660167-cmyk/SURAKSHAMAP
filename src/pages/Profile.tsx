@@ -5,13 +5,67 @@ import { SidebarLayout } from '../components/Sidebar';
 import { useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
 
+async function compressAvatarFile(file: File): Promise<string> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Please choose a valid image file (JPG, PNG, or WebP).');
+  }
+  if (file.size > 15 * 1024 * 1024) {
+    throw new Error('Image is too large. Please choose a file under 15 MB.');
+  }
+
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('Could not read the selected image file.'));
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read the selected image file.'));
+    reader.readAsDataURL(file);
+  });
+
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Unsupported image format.'));
+      el.src = rawDataUrl;
+    });
+
+    const maxSide = 256;
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+    const targetWidth = Math.max(1, Math.round((img.naturalWidth || maxSide) * scale));
+    const targetHeight = Math.max(1, Math.round((img.naturalHeight || maxSide) * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return rawDataUrl;
+    }
+
+    ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+    return canvas.toDataURL('image/jpeg', 0.82);
+  } catch {
+    if (rawDataUrl.length <= 180 * 1024) {
+      return rawDataUrl;
+    }
+    throw new Error('Could not process this image format. Please use a JPG, PNG, or WebP photo.');
+  }
+}
+
 export const Profile: React.FC = () => {
   const { user, isAuthenticated, updateProfile, signInWithGoogleDemo } = useAuth();
   const { hazards } = useSafetyData();
 
   const [fullName, setFullName] = useState(user?.fullName ?? 'Ananya Rao');
   const [phone, setPhone] = useState(user?.phone ?? '+91 98450 23190');
-  const [saved, setSaved] = useState(false);
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
 
   useEffect(() => {
     if (user) {
@@ -28,24 +82,44 @@ export const Profile: React.FC = () => {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    setUploadError(null);
     if (!isAuthenticated) {
       signInWithGoogleDemo('citizen');
     }
-    await updateProfile({ fullName, phone });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    const res = await updateProfile({ fullName, phone });
+    if (!res.ok) {
+      setUploadError(res.error ?? 'Could not save profile changes.');
+      return;
+    }
+    setSavedMessage('Profile changes saved.');
+    setTimeout(() => setSavedMessage(null), 3500);
   };
 
-  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        updateProfile({ avatarUrl: reader.result });
+
+    setUploadError(null);
+    setSavedMessage(null);
+    setUploadingAvatar(true);
+
+    try {
+      const compressedAvatar = await compressAvatarFile(file);
+      const res = await updateProfile({ avatarUrl: compressedAvatar });
+      if (!res.ok) {
+        setUploadError(res.error ?? 'Could not save profile picture to database.');
+        return;
       }
-    };
-    reader.readAsDataURL(file);
+      setSavedMessage('Profile picture updated successfully.');
+      setTimeout(() => setSavedMessage(null), 3500);
+    } catch (err) {
+      setUploadError(
+        err instanceof Error ? err.message : 'Unable to upload profile picture.'
+      );
+    } finally {
+      setUploadingAvatar(false);
+    }
   };
 
   return (
@@ -86,6 +160,7 @@ export const Profile: React.FC = () => {
                 <input
                   type="file"
                   accept="image/*"
+                  disabled={uploadingAvatar}
                   onChange={handleAvatarUpload}
                   className="hidden"
                 />
@@ -100,6 +175,19 @@ export const Profile: React.FC = () => {
                 {user?.email ?? 'ananya.rao@surakshamap.org'} ·{' '}
                 <span className="capitalize">{user?.role ?? 'citizen'}</span>
               </p>
+              <div className="mt-2 flex flex-wrap items-center gap-3">
+                <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
+                  <Camera size={13} />
+                  {uploadingAvatar ? 'Uploading Photo...' : 'Upload Profile Photo'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    disabled={uploadingAvatar}
+                    onChange={handleAvatarUpload}
+                    className="hidden"
+                  />
+                </label>
+              </div>
 
               <div className="mt-4 flex flex-wrap gap-6">
                 <div>
@@ -118,16 +206,22 @@ export const Profile: React.FC = () => {
             </div>
           </div>
 
+          {uploadError && (
+            <div className="mt-5 rounded-lg border border-red-200 bg-red-50 p-3 text-xs font-medium text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+              {uploadError}
+            </div>
+          )}
+          {savedMessage && (
+            <div className="mt-5 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300">
+              <CheckCircle2 size={15} />
+              {savedMessage}
+            </div>
+          )}
+
           <form
             onSubmit={handleSave}
             className="mt-8 space-y-4 border-t border-slate-100 pt-6 dark:border-slate-800"
           >
-            {saved && (
-              <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs font-medium text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-300">
-                <CheckCircle2 size={15} />
-                Profile changes saved.
-              </div>
-            )}
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div>

@@ -61,7 +61,7 @@ interface AuthContextValue {
   logout: () => Promise<void>;
   updateProfile: (
     updates: Partial<Pick<UserAccount, 'fullName' | 'phone' | 'avatarUrl'>>
-  ) => Promise<void>;
+  ) => Promise<{ ok: boolean; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -653,28 +653,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const updateProfile = async (
     updates: Partial<Pick<UserAccount, 'fullName' | 'phone' | 'avatarUrl'>>
-  ) => {
-    if (!user) return;
-    const updated: UserAccount = { ...user, ...updates };
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const activeUser = user ?? loadFallbackSession() ?? signInWithGoogleDemo('citizen');
+    const updated: UserAccount = { ...activeUser, ...updates };
     persistLocalSession(updated, true);
 
-    if (supabase && user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            full_name: updated.fullName,
-            phone: updated.phone ?? null,
-            avatar_url: updated.avatarUrl,
-          },
-        });
-      } catch {
-        // Ignore auth metadata update errors
-      }
+    if (supabase && activeUser.id !== DEMO_CITIZEN.id && activeUser.id !== DEMO_ADMIN.id) {
+      let profileError: string | undefined;
 
       try {
-        await supabase.from('profiles').upsert(
+        const { error: upsertErr } = await supabase.from('profiles').upsert(
           {
-            id: user.id,
+            id: activeUser.id,
             full_name: updated.fullName,
             email: updated.email,
             phone: updated.phone ?? null,
@@ -684,21 +674,59 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           },
           { onConflict: 'id' }
         );
-      } catch {
-        // Ignore profile table upsert errors if schema is not yet applied
+        if (upsertErr) {
+          profileError = upsertErr.message;
+        }
+      } catch (err) {
+        profileError = err instanceof Error ? err.message : 'Could not save profile to database.';
       }
-    } else if (user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
-      await fetch('/api/auth/profile', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: user.id,
-          fullName: updated.fullName,
-          phone: updated.phone,
-          avatarUrl: updated.avatarUrl,
-        }),
-      }).catch(() => undefined);
+
+      // Update auth metadata after profiles upsert, and never store base64 data URLs in JWT metadata
+      const shouldUpdateAuthMeta =
+        updates.fullName !== undefined ||
+        updates.phone !== undefined ||
+        (updates.avatarUrl !== undefined && !updates.avatarUrl.startsWith('data:'));
+
+      if (shouldUpdateAuthMeta) {
+        try {
+          await supabase.auth.updateUser({
+            data: {
+              full_name: updated.fullName,
+              phone: updated.phone ?? null,
+              ...(updated.avatarUrl && !updated.avatarUrl.startsWith('data:')
+                ? { avatar_url: updated.avatarUrl }
+                : {}),
+            },
+          });
+        } catch {
+          // Ignore non-fatal auth metadata sync error
+        }
+      }
+
+      return profileError ? { ok: false, error: profileError } : { ok: true };
     }
+
+    if (activeUser.id !== DEMO_CITIZEN.id && activeUser.id !== DEMO_ADMIN.id) {
+      try {
+        const res = await fetch('/api/auth/profile', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: activeUser.id,
+            fullName: updated.fullName,
+            phone: updated.phone,
+            avatarUrl: updated.avatarUrl,
+          }),
+        });
+        if (!res.ok) {
+          return { ok: false, error: 'Failed to update profile on server.' };
+        }
+      } catch {
+        // Local session already persisted
+      }
+    }
+
+    return { ok: true };
   };
 
   return (
