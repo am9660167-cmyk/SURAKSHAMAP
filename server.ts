@@ -39,6 +39,11 @@ const DATA_FILE = path.join(DATA_DIR, 'safety-store.json');
 const USERS_FILE = path.join(DATA_DIR, 'users-store.json');
 const PORT = Number(process.env.PORT) || 3000;
 const DEFAULT_AVATAR = '/src/assets/images/avatar_citizen_profile_1794641736396.jpg';
+const ADMIN_EMAIL = 'ammondal45999@gmail.com';
+
+function isAdminEmail(email?: string | null): boolean {
+  return (email ?? '').trim().toLowerCase() === ADMIN_EMAIL;
+}
 
 function loadStore(): SafetyStore {
   try {
@@ -209,7 +214,7 @@ async function startServer() {
       fullName,
       email,
       phone,
-      role: 'citizen',
+      role: isAdminEmail(email) ? 'admin' : 'citizen',
       avatarUrl: DEFAULT_AVATAR,
       joinedAt: new Date().toISOString(),
     };
@@ -247,8 +252,13 @@ async function startServer() {
       return;
     }
 
+    const normalizedUser: UserAccount = {
+      ...found.user,
+      role: isAdminEmail(found.user.email) ? 'admin' : 'citizen',
+    };
+
     res.json({
-      user: found.user,
+      user: normalizedUser,
       totalUsersCount: 1280 + usersStore.users.length,
     });
   });
@@ -287,7 +297,7 @@ async function startServer() {
         fullName: body.fullName !== undefined ? body.fullName : record.user.fullName,
         phone: body.phone !== undefined ? body.phone : record.user.phone,
         avatarUrl: body.avatarUrl !== undefined ? body.avatarUrl : record.user.avatarUrl,
-        role: body.role !== undefined ? body.role : record.user.role,
+        role: isAdminEmail(record.user.email) ? 'admin' : 'citizen',
       };
       return { ...record, user: updatedUser };
     });
@@ -441,6 +451,17 @@ async function startServer() {
   });
 
   app.patch('/api/hazards/:id/status', (req, res) => {
+    const headerEmail = String(req.headers['x-suraksha-admin-email'] ?? '');
+    const bodyEmail = String(
+      (req.body as { adminEmail?: string } | undefined)?.adminEmail ?? ''
+    );
+    if (!isAdminEmail(headerEmail) && !isAdminEmail(bodyEmail)) {
+      res.status(403).json({
+        error: 'Only the authorized Admin account can update or resolve hazard statuses.',
+      });
+      return;
+    }
+
     const { id } = req.params;
     const { status } = (req.body ?? {}) as { status?: ReportStatus };
     if (!status) {
@@ -480,7 +501,7 @@ async function startServer() {
         message:
           status === 'Verified'
             ? `"${targetTitle}" has been approved and verified by Admin.`
-            : `"${targetTitle}" has been marked Resolved by Admin and deleted from the live map.`,
+            : `"${targetTitle}" has been marked Resolved by Admin and removed from the live map.`,
         hazardId: id,
         createdAt: new Date().toISOString(),
         read: false,
@@ -495,11 +516,13 @@ async function startServer() {
   });
 
   app.delete('/api/hazards/:id', (req, res) => {
-    const isAdminHeader = req.headers['x-suraksha-admin'] === 'true';
-    const isAdminBody = Boolean((req.body as { isAdmin?: boolean } | undefined)?.isAdmin);
-    if (!isAdminHeader && !isAdminBody) {
+    const headerEmail = String(req.headers['x-suraksha-admin-email'] ?? '');
+    const bodyEmail = String(
+      (req.body as { adminEmail?: string } | undefined)?.adminEmail ?? ''
+    );
+    if (!isAdminEmail(headerEmail) && !isAdminEmail(bodyEmail)) {
       res.status(403).json({
-        error: 'Only Admin can remove reported hazards from the map.',
+        error: 'Only the authorized Admin account can remove reported hazards from the map.',
       });
       return;
     }

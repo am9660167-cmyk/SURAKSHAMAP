@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { Eye, EyeOff, Lock, Mail, Shield } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
-import { useAuth } from '../context/AuthContext';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 
 interface SignInLocationState {
   prefillEmail?: string;
@@ -50,7 +50,7 @@ export const SignIn: React.FC = () => {
         setError(result.error ?? 'Sign in failed.');
         return;
       }
-      navigate(result.user?.role === 'admin' ? '/admin' : '/dashboard');
+      navigate(isAdminUser(result.user) ? '/admin' : '/dashboard');
     } finally {
       setSubmitting(false);
     }
@@ -251,17 +251,10 @@ export const SignIn: React.FC = () => {
                 Sign in with Google
               </button>
 
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-4 text-xs dark:border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => {
-                    signInWithGoogleDemo('admin');
-                    navigate('/admin');
-                  }}
-                  className="font-medium text-slate-600 hover:text-[#2563EB] dark:text-slate-400"
-                >
-                  Quick Demo: Admin Console →
-                </button>
+              <div className="mt-4 flex items-center justify-between gap-2 border-t border-slate-100 pt-4 text-xs dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">
+                  New to SurakshaMap?
+                </span>
                 <Link
                   to="/signup"
                   className="font-semibold text-[#2563EB] hover:underline dark:text-blue-400"

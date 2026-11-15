@@ -22,7 +22,7 @@ import {
 import { CategoryIcon } from '../components/CategoryIcon';
 import { MapView } from '../components/MapView';
 import { SidebarLayout } from '../components/Sidebar';
-import { useAuth } from '../context/AuthContext';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
 import { HazardReport } from '../types/safety';
 import {
@@ -34,7 +34,8 @@ import {
 import { formatDistance, haversineDistanceKm } from '../utils/location';
 
 export const Dashboard: React.FC = () => {
-  const { authCallbackNotice, clearAuthCallbackMessages } = useAuth();
+  const { user, authCallbackNotice, clearAuthCallbackMessages } = useAuth();
+  const isAdmin = isAdminUser(user);
   const {
     hazards,
     userLocation,
@@ -127,25 +128,37 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
 
-          <Link
-            to="/admin?status=Pending"
-            className="rounded-xl border border-slate-200 bg-white p-4 transition-colors hover:border-orange-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-orange-800"
-          >
-            <div className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
-              <span>Pending Reports</span>
-              <Clock size={15} className="text-[#F97316]" />
-            </div>
-            <div className="mt-2 flex items-baseline justify-between gap-2">
-              <span className="font-mono text-2xl font-bold text-[#F97316] tabular-nums dark:text-orange-400">
-                {stats.pending}
-              </span>
-              {stats.pending > 0 && (
-                <span className="text-[11px] font-semibold text-[#2563EB] dark:text-blue-400">
-                  Approve →
+          {isAdmin ? (
+            <Link
+              to="/admin?status=Pending"
+              className="rounded-xl border border-slate-200 bg-white p-4 transition-colors hover:border-orange-300 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-orange-800"
+            >
+              <div className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
+                <span>Pending Reports</span>
+                <Clock size={15} className="text-[#F97316]" />
+              </div>
+              <div className="mt-2 flex items-baseline justify-between gap-2">
+                <span className="font-mono text-2xl font-bold text-[#F97316] tabular-nums dark:text-orange-400">
+                  {stats.pending}
                 </span>
-              )}
+                {stats.pending > 0 && (
+                  <span className="text-[11px] font-semibold text-[#2563EB] dark:text-blue-400">
+                    Approve →
+                  </span>
+                )}
+              </div>
+            </Link>
+          ) : (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">
+                <span>Pending Reports</span>
+                <Clock size={15} className="text-[#F97316]" />
+              </div>
+              <div className="mt-2 font-mono text-2xl font-bold text-[#F97316] tabular-nums dark:text-orange-400">
+                {stats.pending}
+              </div>
             </div>
-          </Link>
+          )}
 
           <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center justify-between text-xs font-medium text-slate-500 dark:text-slate-400">

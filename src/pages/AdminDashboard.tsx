@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   CheckCircle2,
   Clock,
   Eye,
+  Lock,
+  LogIn,
   MapPin,
   ShieldCheck,
   Trash2,
@@ -27,7 +29,7 @@ import {
 import { CategoryIcon } from '../components/CategoryIcon';
 import { MapView } from '../components/MapView';
 import { SidebarLayout } from '../components/Sidebar';
-import { useAuth } from '../context/AuthContext';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
 import { HazardReport, ReportStatus } from '../types/safety';
 import {
@@ -39,11 +41,11 @@ import {
 
 export const AdminDashboard: React.FC = () => {
   const [searchParams] = useSearchParams();
-  const { user, allUsersCount, grantAdminAccess } = useAuth();
+  const { user, allUsersCount } = useAuth();
   const { hazards, updateHazardStatus, deleteHazardReport, userLocation } =
     useSafetyData();
 
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = isAdminUser(user);
   const initialStatus = searchParams.get('status');
   const [statusFilter, setStatusFilter] = useState<ReportStatus | 'All'>(
     initialStatus === 'Pending' ||
@@ -73,40 +75,36 @@ export const AdminDashboard: React.FC = () => {
   const [mapModalHazard, setMapModalHazard] = useState<HazardReport | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
-  const [grantingAdmin, setGrantingAdmin] = useState(false);
 
-  const ensureAdminSession = () => {
-    if (!isAdmin) {
-      void grantAdminAccess();
-    }
+  const handleApprove = async (report: HazardReport) => {
+    await updateHazardStatus(report.id, 'Verified');
+    setActionFeedback(
+      `Approved "${report.title}" — now marked as Verified for all community users.`
+    );
   };
 
-  const handleEnableAdmin = async () => {
-    setGrantingAdmin(true);
-    try {
-      await grantAdminAccess();
-      setActionFeedback('Admin access enabled. You can approve, resolve, reject, or delete any incoming hazard report.');
-    } finally {
-      setGrantingAdmin(false);
-    }
+  const handleResolve = async (report: HazardReport) => {
+    await updateHazardStatus(report.id, 'Resolved');
+    setActionFeedback(
+      `Marked "${report.title}" as Resolved — removed from the live map and all users notified.`
+    );
   };
 
-  const handleApprove = (report: HazardReport) => {
-    ensureAdminSession();
-    updateHazardStatus(report.id, 'Verified');
-    setActionFeedback(`Approved "${report.title}" — now marked as Verified on the community map.`);
+  const handleReject = async (report: HazardReport) => {
+    await updateHazardStatus(report.id, 'Rejected');
+    setActionFeedback(`Rejected "${report.title}".`);
   };
 
-  const handleApproveAllPending = () => {
-    ensureAdminSession();
+  const handleApproveAllPending = async () => {
     const list = hazards.filter((h) => h.status === 'Pending');
-    list.forEach((r) => updateHazardStatus(r.id, 'Verified'));
-    setActionFeedback(`Approved all ${list.length} pending hazard report${list.length === 1 ? '' : 's'}.`);
+    await Promise.all(list.map((r) => updateHazardStatus(r.id, 'Verified')));
+    setActionFeedback(
+      `Approved all ${list.length} pending hazard report${list.length === 1 ? '' : 's'}.`
+    );
   };
 
   const handleDelete = async (report: HazardReport) => {
-    ensureAdminSession();
-    await deleteHazardReport(report.id, true);
+    await deleteHazardReport(report.id);
     setConfirmDeleteId(null);
     setActionFeedback(`Deleted "${report.title}" from SurakshaMap.`);
   };
@@ -151,6 +149,62 @@ export const AdminDashboard: React.FC = () => {
     return hazards.filter((h) => h.status === statusFilter);
   }, [hazards, statusFilter]);
 
+  if (!isAdmin) {
+    return (
+      <SidebarLayout title="Admin Access Restricted">
+        <div className="mx-auto max-w-xl py-10">
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-amber-50 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400">
+              <Lock size={22} />
+            </div>
+            <h2 className="mt-4 text-lg font-bold text-[#14213D] dark:text-white">
+              Administrator Access Only
+            </h2>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
+              {user
+                ? 'Your account has standard community permissions. You can report new hazards, confirm active hazards, and view live safety maps, while only the site administrator can resolve hazards or access this console.'
+                : 'Please sign in with the authorized site administrator account to access moderation and hazard resolution controls.'}
+            </p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              {user ? (
+                <>
+                  <Link
+                    to="/report"
+                    className="inline-flex items-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-700"
+                  >
+                    Report a Hazard
+                  </Link>
+                  <Link
+                    to="/dashboard"
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Back to Dashboard
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <Link
+                    to="/signin"
+                    className="inline-flex items-center gap-2 rounded-lg bg-[#2563EB] px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-700"
+                  >
+                    <LogIn size={14} />
+                    Sign In
+                  </Link>
+                  <Link
+                    to="/map"
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Explore Live Map
+                  </Link>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </SidebarLayout>
+    );
+  }
+
   return (
     <SidebarLayout title="Admin Moderation & Analytics">
       <div className="mx-auto max-w-7xl space-y-6">
@@ -159,24 +213,13 @@ export const AdminDashboard: React.FC = () => {
           <div className="flex items-center gap-2.5">
             <ShieldCheck size={17} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
             <span>
-              <strong>Admin Moderation Access Ready</strong>
-              {isAdmin ? ` (${user?.fullName ?? 'Admin'})` : ''} ·{' '}
+              <strong>Admin Moderation Access Active</strong> ({user?.fullName ?? 'Administrator'}) ·{' '}
               {metrics.pending > 0
-                ? `${metrics.pending} pending hazard report${metrics.pending === 1 ? '' : 's'} ready for approval.`
+                ? `${metrics.pending} pending hazard report${metrics.pending === 1 ? '' : 's'} ready for review.`
                 : 'All incoming hazard reports have been reviewed.'}
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {!isAdmin && (
-              <button
-                type="button"
-                onClick={() => void handleEnableAdmin()}
-                disabled={grantingAdmin}
-                className="rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-60 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-200"
-              >
-                {grantingAdmin ? 'Switching...' : 'Switch to Admin Profile'}
-              </button>
-            )}
             {metrics.pending > 0 && statusFilter !== 'Pending' && (
               <button
                 type="button"
@@ -215,7 +258,7 @@ export const AdminDashboard: React.FC = () => {
               {pendingReports.length > 1 && (
                 <button
                   type="button"
-                  onClick={handleApproveAllPending}
+                  onClick={() => void handleApproveAllPending()}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700"
                 >
                   <CheckCircle2 size={13} />
@@ -278,7 +321,7 @@ export const AdminDashboard: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleApprove(report)}
+                        onClick={() => void handleApprove(report)}
                         className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
                       >
                         <CheckCircle2 size={13} />
@@ -286,13 +329,7 @@ export const AdminDashboard: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          ensureAdminSession();
-                          updateHazardStatus(report.id, 'Resolved');
-                          setActionFeedback(
-                            `Marked "${report.title}" as Resolved — removed from the live map for all users.`
-                          );
-                        }}
+                        onClick={() => void handleResolve(report)}
                         className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
                       >
                         <Wrench size={12} />
@@ -300,11 +337,7 @@ export const AdminDashboard: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          ensureAdminSession();
-                          updateHazardStatus(report.id, 'Rejected');
-                          setActionFeedback(`Rejected "${report.title}".`);
-                        }}
+                        onClick={() => void handleReject(report)}
                         className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
                       >
                         <XCircle size={12} />
@@ -568,7 +601,7 @@ export const AdminDashboard: React.FC = () => {
                           {report.status !== 'Verified' ? (
                             <button
                               type="button"
-                              onClick={() => handleApprove(report)}
+                              onClick={() => void handleApprove(report)}
                               title="Approve this hazard report"
                               className="inline-flex items-center gap-1 rounded bg-emerald-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700"
                             >
@@ -585,14 +618,8 @@ export const AdminDashboard: React.FC = () => {
                           {report.status !== 'Resolved' ? (
                             <button
                               type="button"
-                              onClick={() => {
-                                ensureAdminSession();
-                                updateHazardStatus(report.id, 'Resolved');
-                                setActionFeedback(
-                                  `Marked "${report.title}" as Resolved — removed from the live map for all users.`
-                                );
-                              }}
-                              title="Mark report resolved and delete from map"
+                              onClick={() => void handleResolve(report)}
+                              title="Mark report resolved and remove from map"
                               className="inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700"
                             >
                               <Wrench size={11} />
@@ -606,11 +633,7 @@ export const AdminDashboard: React.FC = () => {
                           )}
                           <button
                             type="button"
-                            onClick={() => {
-                              ensureAdminSession();
-                              updateHazardStatus(report.id, 'Rejected');
-                              setActionFeedback(`Rejected "${report.title}".`);
-                            }}
+                            onClick={() => void handleReject(report)}
                             title="Reject report"
                             className="inline-flex items-center gap-1 rounded bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-700"
                           >

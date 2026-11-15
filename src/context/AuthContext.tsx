@@ -6,6 +6,16 @@ import { UserAccount } from '../types/safety';
 const SESSION_STORAGE_KEY = 'surakshamap_session_v1';
 const DEFAULT_AVATAR = '/src/assets/images/avatar_citizen_profile_1794641736396.jpg';
 
+export const ADMIN_EMAIL = 'ammondal45999@gmail.com';
+
+export function isAdminEmail(email?: string | null): boolean {
+  return (email ?? '').trim().toLowerCase() === ADMIN_EMAIL;
+}
+
+export function isAdminUser(account?: UserAccount | null): boolean {
+  return Boolean(account && account.role === 'admin' && isAdminEmail(account.email));
+}
+
 const DEMO_CITIZEN: UserAccount = {
   id: 'user-demo-1',
   fullName: 'Ananya Rao',
@@ -14,16 +24,6 @@ const DEMO_CITIZEN: UserAccount = {
   role: 'citizen',
   avatarUrl: DEFAULT_AVATAR,
   joinedAt: '2025-09-12T08:30:00.000Z',
-};
-
-const DEMO_ADMIN: UserAccount = {
-  id: 'user-admin-1',
-  fullName: 'Arvind Deshmukh',
-  email: 'admin@surakshamap.org',
-  phone: '+91 98450 99001',
-  role: 'admin',
-  avatarUrl: DEFAULT_AVATAR,
-  joinedAt: '2025-06-01T08:00:00.000Z',
 };
 
 interface SignUpPayload {
@@ -56,8 +56,7 @@ interface AuthContextValue {
   ) => Promise<AuthResult>;
   signUp: (payload: SignUpPayload) => Promise<AuthResult>;
   requestPasswordReset: (email: string) => Promise<AuthResult>;
-  signInWithGoogleDemo: (mode?: 'citizen' | 'admin') => UserAccount;
-  grantAdminAccess: () => Promise<UserAccount>;
+  signInWithGoogleDemo: (mode?: 'citizen') => UserAccount;
   logout: () => Promise<void>;
   updateProfile: (
     updates: Partial<Pick<UserAccount, 'fullName' | 'phone' | 'avatarUrl'>>
@@ -73,10 +72,13 @@ function loadFallbackSession(): UserAccount | null {
       sessionStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as UserAccount;
-    if (supabase && parsed.id !== DEMO_CITIZEN.id && parsed.id !== DEMO_ADMIN.id) {
+    if (supabase && parsed.id !== DEMO_CITIZEN.id) {
       return null;
     }
-    return parsed;
+    return {
+      ...parsed,
+      role: isAdminEmail(parsed.email) ? 'admin' : 'citizen',
+    };
   } catch {
     return null;
   }
@@ -84,10 +86,7 @@ function loadFallbackSession(): UserAccount | null {
 
 function mapSupabaseUser(sbUser: SupabaseUser, profileRow?: Record<string, unknown> | null): UserAccount {
   const meta = (sbUser.user_metadata ?? {}) as Record<string, unknown>;
-  const roleValue =
-    (profileRow?.role as string | undefined) ??
-    (meta.role as string | undefined) ??
-    'citizen';
+  const resolvedEmail = (profileRow?.email as string | undefined) ?? sbUser.email ?? '';
   return {
     id: sbUser.id,
     fullName:
@@ -95,12 +94,12 @@ function mapSupabaseUser(sbUser: SupabaseUser, profileRow?: Record<string, unkno
       (meta.full_name as string | undefined) ??
       sbUser.email?.split('@')[0] ??
       'Citizen User',
-    email: (profileRow?.email as string | undefined) ?? sbUser.email ?? '',
+    email: resolvedEmail,
     phone:
       (profileRow?.phone as string | undefined) ??
       (meta.phone as string | undefined) ??
       undefined,
-    role: roleValue === 'admin' ? 'admin' : 'citizen',
+    role: isAdminEmail(resolvedEmail) ? 'admin' : 'citizen',
     avatarUrl:
       (profileRow?.avatar_url as string | undefined) ??
       (meta.avatar_url as string | undefined) ??
@@ -191,7 +190,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           .maybeSingle();
 
         if (existing) {
-          return mapSupabaseUser(sbUser, existing);
+          const expectedRole = isAdminEmail(sbUser.email) ? 'admin' : 'citizen';
+          if (existing.role !== expectedRole) {
+            await supabase!
+              .from('profiles')
+              .update({ role: expectedRole, updated_at: new Date().toISOString() })
+              .eq('id', sbUser.id);
+          }
+          return mapSupabaseUser(sbUser, { ...existing, role: expectedRole });
         }
 
         const meta = (sbUser.user_metadata ?? {}) as Record<string, unknown>;
@@ -204,7 +210,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             'Citizen User',
           email: sbUser.email ?? '',
           phone: extra?.phone ?? (meta.phone as string | undefined) ?? null,
-          role: (meta.role as string | undefined) === 'admin' ? 'admin' : 'citizen',
+          role: isAdminEmail(sbUser.email) ? 'admin' : 'citizen',
           avatar_url: (meta.avatar_url as string | undefined) ?? DEFAULT_AVATAR,
         };
 
@@ -342,9 +348,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             if (mounted) setUser(mapped);
           });
         } else {
-          setUser((prev) =>
-            prev?.id === DEMO_CITIZEN.id || prev?.id === DEMO_ADMIN.id ? prev : null
-          );
+          setUser((prev) => (prev?.id === DEMO_CITIZEN.id ? prev : null));
         }
       }
     );
@@ -454,7 +458,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             data: {
               full_name: payload.fullName.trim(),
               phone: payload.phone?.trim() || null,
-              role: 'citizen',
+              role: isAdminEmail(normalized) ? 'admin' : 'citizen',
               avatar_url: DEFAULT_AVATAR,
             },
           },
@@ -606,42 +610,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const signInWithGoogleDemo = (mode: 'citizen' | 'admin' = 'citizen'): UserAccount => {
-    const target = mode === 'admin' ? DEMO_ADMIN : DEMO_CITIZEN;
-    persistLocalSession(target, true);
-    return target;
-  };
-
-  const grantAdminAccess = async (): Promise<UserAccount> => {
-    if (!user) {
-      persistLocalSession(DEMO_ADMIN, true);
-      return DEMO_ADMIN;
-    }
-    const promoted: UserAccount = { ...user, role: 'admin' };
-    persistLocalSession(promoted, true);
-
-    if (supabase && user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
-      try {
-        await supabase.auth.updateUser({ data: { role: 'admin' } });
-      } catch {
-        // Ignore metadata error
-      }
-      try {
-        await supabase
-          .from('profiles')
-          .update({ role: 'admin', updated_at: new Date().toISOString() })
-          .eq('id', user.id);
-      } catch {
-        // Ignore profile role update error
-      }
-    } else if (user.id !== DEMO_CITIZEN.id && user.id !== DEMO_ADMIN.id) {
-      await fetch('/api/auth/profile', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: user.id, role: 'admin' }),
-      }).catch(() => undefined);
-    }
-    return promoted;
+  const signInWithGoogleDemo = (): UserAccount => {
+    persistLocalSession(DEMO_CITIZEN, true);
+    return DEMO_CITIZEN;
   };
 
   const logout = async () => {
@@ -654,11 +625,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const updateProfile = async (
     updates: Partial<Pick<UserAccount, 'fullName' | 'phone' | 'avatarUrl'>>
   ): Promise<{ ok: boolean; error?: string }> => {
-    const activeUser = user ?? loadFallbackSession() ?? signInWithGoogleDemo('citizen');
+    const activeUser = user ?? loadFallbackSession() ?? signInWithGoogleDemo();
     const updated: UserAccount = { ...activeUser, ...updates };
     persistLocalSession(updated, true);
 
-    if (supabase && activeUser.id !== DEMO_CITIZEN.id && activeUser.id !== DEMO_ADMIN.id) {
+    if (supabase && activeUser.id !== DEMO_CITIZEN.id) {
       let profileError: string | undefined;
 
       try {
@@ -668,7 +639,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             full_name: updated.fullName,
             email: updated.email,
             phone: updated.phone ?? null,
-            role: updated.role,
+            role: isAdminEmail(updated.email) ? 'admin' : 'citizen',
             avatar_url: updated.avatarUrl,
             updated_at: new Date().toISOString(),
           },
@@ -706,7 +677,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       return profileError ? { ok: false, error: profileError } : { ok: true };
     }
 
-    if (activeUser.id !== DEMO_CITIZEN.id && activeUser.id !== DEMO_ADMIN.id) {
+    if (activeUser.id !== DEMO_CITIZEN.id) {
       try {
         const res = await fetch('/api/auth/profile', {
           method: 'PATCH',
@@ -743,7 +714,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         signUp,
         requestPasswordReset,
         signInWithGoogleDemo,
-        grantAdminAccess,
         logout,
         updateProfile,
       }}

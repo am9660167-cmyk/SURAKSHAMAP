@@ -21,7 +21,7 @@ import {
   User,
   X,
 } from 'lucide-react';
-import { useAuth } from '../context/AuthContext';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
 
 interface SidebarProps {
@@ -37,6 +37,8 @@ export const SidebarLayout: React.FC<SidebarProps> = ({ title, children }) => {
   const { user, logout, isAuthenticated } = useAuth();
   const { hazards, unreadCount, settings, toggleTheme } = useSafetyData();
   const pendingCount = hazards.filter((h) => h.status === 'Pending').length;
+
+  const showAdmin = isAdminUser(user);
 
   const navItems = [
     { label: 'Dashboard', to: '/dashboard', icon: LayoutDashboard },
@@ -54,12 +56,16 @@ export const SidebarLayout: React.FC<SidebarProps> = ({ title, children }) => {
     { label: 'Safety Guidelines', to: '/guidelines', icon: BookOpen },
     { label: 'Profile', to: '/profile', icon: User },
     { label: 'Settings', to: '/settings', icon: Settings },
-    {
-      label: 'Admin Dashboard',
-      to: '/admin',
-      icon: ShieldCheck,
-      badge: pendingCount > 0 ? pendingCount : undefined,
-    },
+    ...(showAdmin
+      ? [
+          {
+            label: 'Admin Dashboard',
+            to: '/admin',
+            icon: ShieldCheck,
+            badge: pendingCount > 0 ? pendingCount : undefined,
+          },
+        ]
+      : []),
   ];
 
   const handleLogout = async () => {

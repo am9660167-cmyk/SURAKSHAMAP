@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ComputedRouteSummary, MapView } from '../components/MapView';
 import { SidebarLayout } from '../components/Sidebar';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
 import { HazardReport, NotificationItem, NotificationType } from '../types/safety';
 import {
@@ -34,6 +35,8 @@ function getCardinalDirection(deg: number): string {
 }
 
 export const Notifications: React.FC = () => {
+  const { user } = useAuth();
+  const isAdmin = isAdminUser(user);
   const {
     hazards,
     notifications,
@@ -443,12 +446,21 @@ export const Notifications: React.FC = () => {
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Link
-                      to="/admin"
-                      className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-                    >
-                      Open Admin Moderation
-                    </Link>
+                    {isAdmin ? (
+                      <Link
+                        to="/admin"
+                        className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        Open Admin Moderation
+                      </Link>
+                    ) : (
+                      <Link
+                        to="/explore"
+                        className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        Open Live Map
+                      </Link>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSelectedNotif(null)}

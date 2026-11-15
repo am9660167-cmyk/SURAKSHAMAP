@@ -45,7 +45,7 @@ begin
     coalesce(new.raw_user_meta_data ->> 'full_name', split_part(new.email, '@', 1)),
     new.email,
     new.raw_user_meta_data ->> 'phone',
-    coalesce(new.raw_user_meta_data ->> 'role', 'citizen'),
+    case when lower(new.email) = 'ammondal45999@gmail.com' then 'admin' else 'citizen' end,
     coalesce(
       new.raw_user_meta_data ->> 'avatar_url',
       '/src/assets/images/avatar_citizen_profile_1794641736396.jpg'
@@ -54,6 +54,7 @@ begin
   on conflict (id) do update set
     full_name = excluded.full_name,
     email = excluded.email,
+    role = case when lower(excluded.email) = 'ammondal45999@gmail.com' then 'admin' else 'citizen' end,
     phone = coalesce(excluded.phone, public.profiles.phone),
     updated_at = now();
   return new;
@@ -191,3 +192,25 @@ drop policy if exists "Anyone can submit contact messages" on public.contact_mes
 create policy "Anyone can submit contact messages"
   on public.contact_messages for insert
   with check (true);
+
+-- 6. Ensure fixed admin account role and enable Realtime updates for all users
+update public.profiles
+set role = case when lower(email) = 'ammondal45999@gmail.com' then 'admin' else 'citizen' end,
+    updated_at = now();
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'hazard_reports'
+  ) then
+    alter publication supabase_realtime add table public.hazard_reports;
+  end if;
+
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'notifications'
+  ) then
+    alter publication supabase_realtime add table public.notifications;
+  end if;
+end $$;

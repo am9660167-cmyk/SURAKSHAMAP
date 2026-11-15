@@ -8,7 +8,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { HazardReport } from '../types/safety';
-import { useAuth } from '../context/AuthContext';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 import { useSafetyData } from '../context/SafetyDataContext';
 import {
   formatRelativeDate,
@@ -44,7 +44,7 @@ export const HazardCard: React.FC<HazardCardProps> = ({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const actorId = user?.id ?? 'guest-citizen';
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = isAdminUser(user);
   const canDelete = isAdmin;
   const hasConfirmed = hazard.confirmedByUserIds.includes(actorId);
   const hasReportedAbsent = hazard.notPresentByUserIds.includes(actorId);
@@ -180,7 +180,7 @@ export const HazardCard: React.FC<HazardCardProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    void deleteHazardReport(hazard.id, true);
+                    void deleteHazardReport(hazard.id);
                     setConfirmingDelete(false);
                   }}
                   className="rounded-lg bg-red-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-red-700 whitespace-nowrap shrink-0"

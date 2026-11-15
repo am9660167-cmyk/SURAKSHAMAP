@@ -1,8 +1,12 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { Shield } from 'lucide-react';
+import { isAdminUser, useAuth } from '../context/AuthContext';
 
 export const Footer: React.FC = () => {
+  const { user } = useAuth();
+  const isAdmin = isAdminUser(user);
+
   return (
     <footer className="border-t border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950">
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
@@ -64,11 +68,13 @@ export const Footer: React.FC = () => {
                   User Dashboard
                 </Link>
               </li>
-              <li>
-                <Link to="/admin" className="hover:text-[#2563EB] dark:hover:text-blue-400">
-                  Admin Dashboard
-                </Link>
-              </li>
+              {isAdmin && (
+                <li>
+                  <Link to="/admin" className="hover:text-[#2563EB] dark:hover:text-blue-400">
+                    Admin Dashboard
+                  </Link>
+                </li>
+              )}
               <li>
                 <Link to="/signin" className="hover:text-[#2563EB] dark:hover:text-blue-400">
                   Sign In

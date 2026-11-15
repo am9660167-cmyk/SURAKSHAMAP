@@ -18,7 +18,7 @@ import {
   detectApproximateNetworkPosition,
   detectPositionWithSource,
 } from '../utils/location';
-import { useAuth } from './AuthContext';
+import { isAdminUser, useAuth } from './AuthContext';
 
 const HAZARDS_KEY = 'surakshamap_hazards_v1';
 const DELETED_HAZARDS_KEY = 'surakshamap_deleted_hazards_v1';
@@ -68,8 +68,8 @@ interface SafetyDataContextValue {
   addHazardReport: (input: AddHazardInput) => Promise<HazardReport>;
   confirmHazard: (hazardId: string, userId: string) => void;
   reportNotPresent: (hazardId: string, userId: string) => void;
-  updateHazardStatus: (hazardId: string, status: ReportStatus) => void;
-  deleteHazardReport: (hazardId: string, isAdminAction?: boolean) => Promise<void>;
+  updateHazardStatus: (hazardId: string, status: ReportStatus) => Promise<void>;
+  deleteHazardReport: (hazardId: string) => Promise<void>;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   updateSettings: (partial: Partial<UserSettings>) => void;
@@ -401,8 +401,15 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       )
       .subscribe();
 
+    const syncInterval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void loadSupabaseSafetyData(false);
+      }
+    }, 4000);
+
     return () => {
       active = false;
+      window.clearInterval(syncInterval);
       window.removeEventListener('focus', handleVisibilityOrFocus);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
       void client.removeChannel(channel);
@@ -598,7 +605,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
 
       await supabase.from('notifications').insert({
         id: newNotif.id,
-        user_id: user && isUuid(user.id) ? user.id : null,
+        user_id: null,
         type: newNotif.type,
         title: newNotif.title,
         message: newNotif.message,
@@ -732,44 +739,59 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const updateHazardStatus = (hazardId: string, status: ReportStatus) => {
+  const updateHazardStatus = async (hazardId: string, status: ReportStatus) => {
+    if (!isAdminUser(user)) {
+      return;
+    }
+
     const existing = hazards.find((h) => h.id === hazardId);
     const targetTitle = existing?.title ?? '';
+    const nextTrust = existing
+      ? status === 'Verified'
+        ? Math.max(existing.trustScore, 90)
+        : status === 'Rejected'
+        ? 20
+        : existing.trustScore
+      : status === 'Verified'
+      ? 90
+      : 75;
 
     setHazards((prev) =>
       prev.map((h) => {
         if (h.id !== hazardId) return h;
-        const nextTrust =
+        const computedTrust =
           status === 'Verified'
             ? Math.max(h.trustScore, 90)
             : status === 'Rejected'
             ? 20
             : h.trustScore;
-        if (supabase) {
-          void supabase
-            .from('hazard_reports')
-            .update({ status, trust_score: nextTrust })
-            .eq('id', hazardId);
-        }
         return {
           ...h,
           status,
-          trustScore: nextTrust,
+          trustScore: computedTrust,
         };
       })
     );
 
-    if (!supabase) {
-      void fetch(`/api/hazards/${encodeURIComponent(hazardId)}/status`, {
+    if (supabase) {
+      await supabase
+        .from('hazard_reports')
+        .update({ status, trust_score: nextTrust })
+        .eq('id', hazardId);
+    } else {
+      await fetch(`/api/hazards/${encodeURIComponent(hazardId)}/status`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-suraksha-admin-email': user?.email ?? '',
+        },
+        body: JSON.stringify({ status, adminEmail: user?.email ?? '' }),
       }).catch(() => undefined);
     }
 
     if (status === 'Verified' || status === 'Resolved') {
       const notif: NotificationItem = {
-        id: `notif-${Date.now()}`,
+        id: `notif-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         type: status === 'Verified' ? 'Verified Report' : 'Resolved Report',
         title:
           status === 'Verified'
@@ -778,7 +800,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
         message:
           status === 'Verified'
             ? `"${targetTitle || 'Community hazard report'}" has been approved and verified by Admin.`
-            : `"${targetTitle || 'Community hazard report'}" has been marked Resolved by Admin and deleted from the live map.`,
+            : `"${targetTitle || 'Community hazard report'}" has been marked Resolved by Admin and removed from the live map.`,
         hazardId,
         createdAt: new Date().toISOString(),
         read: false,
@@ -786,7 +808,7 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       setNotifications((prev) => [notif, ...prev]);
 
       if (supabase) {
-        void supabase.from('notifications').insert({
+        await supabase.from('notifications').insert({
           id: notif.id,
           user_id: null,
           type: notif.type,
@@ -801,8 +823,8 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   };
 
-  const deleteHazardReport = async (hazardId: string, isAdminAction = false) => {
-    if (!isAdminAction && user?.role !== 'admin') {
+  const deleteHazardReport = async (hazardId: string) => {
+    if (!isAdminUser(user)) {
       return;
     }
 
@@ -844,9 +866,9 @@ export const SafetyDataProvider: React.FC<{ children: React.ReactNode }> = ({
       method: 'DELETE',
       headers: {
         'Content-Type': 'application/json',
-        'x-suraksha-admin': 'true',
+        'x-suraksha-admin-email': user?.email ?? '',
       },
-      body: JSON.stringify({ isAdmin: true }),
+      body: JSON.stringify({ adminEmail: user?.email ?? '' }),
     }).catch(() => undefined);
   };
 
